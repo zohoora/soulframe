@@ -22,7 +22,7 @@ class FaceData:
     """Snapshot of vision pipeline output."""
     frame_counter: int = 0
     num_faces: int = 0
-    face_distance_cm: float = 0.0
+    face_distance_cm: float = 999.0
     gaze_screen_x: float = 0.0  # normalized 0.0–1.0
     gaze_screen_y: float = 0.0
     gaze_confidence: float = 0.0
@@ -35,7 +35,7 @@ class FaceData:
 
 @dataclass
 class RegionShape:
-    shape_type: str  # "polygon"
+    shape_type: str = "polygon"
     points_normalized: List[Tuple[float, float]] = field(default_factory=list)
 
 

@@ -2,7 +2,6 @@
 
 import logging
 import queue
-import time
 
 import pyglet
 from pyglet import gl
@@ -23,10 +22,14 @@ def run_display_process(cmd_queue):
     )
     logger.info("Display process starting")
 
-    display = pyglet.canvas.get_display()
+    display = pyglet.display.get_display()
     screens = display.get_screens()
-    screen = screens[0]
-    logger.info("Using screen: %dx%d", screen.width, screen.height)
+    if not screens:
+        logger.error("No screens detected — cannot start display process")
+        return
+    screen_index = min(config.DISPLAY_SCREEN_INDEX, len(screens) - 1)
+    screen = screens[screen_index]
+    logger.info("Using screen %d: %dx%d", screen_index, screen.width, screen.height)
 
     window = pyglet.window.Window(
         width=config.DISPLAY_WIDTH,
@@ -45,13 +48,18 @@ def run_display_process(cmd_queue):
     gaze_x = 0.5
     gaze_y = 0.5
     should_exit = False
+    last_dt = [1.0 / config.DISPLAY_FPS]  # mutable container for closure
 
     @window.event
     def on_draw():
-        window.clear()
+        """Render the frame — this is the ONLY place drawing should happen."""
+        effect_manager.update(last_dt[0])
+        uniforms = effect_manager.get_uniforms()
+        renderer.render(uniforms, gaze_x, gaze_y, last_dt[0])
 
     def update(dt):
         nonlocal gaze_x, gaze_y, should_exit
+        last_dt[0] = dt
 
         # Drain pending commands
         while True:
@@ -71,10 +79,6 @@ def run_display_process(cmd_queue):
                 pyglet.app.exit()
                 return
 
-        effect_manager.update(dt)
-        uniforms = effect_manager.get_uniforms()
-        renderer.render(uniforms, gaze_x, gaze_y, dt)
-
     def _handle_command(cmd, rend, effects):
         nonlocal gaze_x, gaze_y
         p = cmd.params or {}
@@ -89,7 +93,8 @@ def run_display_process(cmd_queue):
 
         elif cmd.cmd_type == CommandType.SET_EFFECT:
             effect_type = p.get("effect_type", "")
-            effects.set_effect(effect_type, p)
+            effect_params = {k: v for k, v in p.items() if k != "effect_type"}
+            effects.set_effect(effect_type, effect_params)
 
         elif cmd.cmd_type == CommandType.SET_EFFECT_INTENSITY:
             effects.set_intensity(p.get("effect_type", ""), p.get("intensity", 0.0))
@@ -127,6 +132,8 @@ def run_display_process(cmd_queue):
 
     try:
         pyglet.app.run()
+    except KeyboardInterrupt:
+        logger.info("Display process received KeyboardInterrupt")
     except Exception:
         logger.exception("Display process encountered an error")
     finally:

@@ -2,8 +2,12 @@
 
 Vision process writes a 40-byte struct at ~30 Hz.
 Brain reads it to drive the state machine.
+
+A simple seqlock prevents torn reads on architectures where a 40-byte
+memcpy is not atomic (e.g. aarch64/Jetson).
 """
 
+import ctypes
 import struct
 import time
 from multiprocessing import shared_memory
@@ -12,14 +16,32 @@ from typing import Optional
 from soulframe.shared.types import FaceData
 from soulframe import config
 
-# Struct layout: see architecture spec
-# Total: 40 bytes
+# Memory fence for cross-process seqlock correctness on weakly-ordered
+# architectures (e.g. aarch64/Jetson).
+try:
+    _libc = ctypes.CDLL(None)
+    _libc.__sync_synchronize.restype = None
+    _libc.__sync_synchronize.argtypes = []
+
+    def _memory_fence() -> None:
+        """Full memory barrier via GCC __sync_synchronize (dmb on ARM)."""
+        _libc.__sync_synchronize()
+
+except (OSError, AttributeError):
+    _fence_loc = ctypes.c_uint32(0)
+
+    def _memory_fence() -> None:
+        """Fallback fence via volatile-style ctypes write."""
+        _fence_loc.value = _fence_loc.value
+
+# Data struct layout (unchanged from spec).
 _STRUCT_FMT = "<IIffffffQ"
 _STRUCT_SIZE = struct.calcsize(_STRUCT_FMT)  # 40
 
-assert _STRUCT_SIZE == config.VISION_SHM_SIZE, (
-    f"Struct size mismatch: {_STRUCT_SIZE} != {config.VISION_SHM_SIZE}"
-)
+# Seqlock: a single uint32 counter prepended to the data.
+_SEQ_FMT = "<I"
+_SEQ_SIZE = struct.calcsize(_SEQ_FMT)  # 4
+_TOTAL_SHM_SIZE = _SEQ_SIZE + _STRUCT_SIZE  # 44
 
 
 class VisionShmWriter:
@@ -27,36 +49,55 @@ class VisionShmWriter:
 
     def __init__(self) -> None:
         try:
-            # Clean up any stale segment from a previous run
             old = shared_memory.SharedMemory(name=config.VISION_SHM_NAME, create=False)
             old.close()
             old.unlink()
-        except FileNotFoundError:
+        except Exception:
             pass
         self._shm = shared_memory.SharedMemory(
-            name=config.VISION_SHM_NAME, create=True, size=_STRUCT_SIZE
+            name=config.VISION_SHM_NAME, create=True, size=_TOTAL_SHM_SIZE
         )
+        try:
+            # Initialise seqlock counter to 0 (even = no write in progress).
+            struct.pack_into(_SEQ_FMT, self._shm.buf, 0, 0)
+        except Exception:
+            self._shm.close()
+            self._shm.unlink()
+            raise
+        self._seq: int = 0
 
     def write(self, data: FaceData) -> None:
-        packed = struct.pack(
-            _STRUCT_FMT,
-            data.frame_counter,
-            data.num_faces,
-            data.face_distance_cm,
-            data.gaze_screen_x,
-            data.gaze_screen_y,
-            data.gaze_confidence,
-            data.head_yaw,
-            data.head_pitch,
-            data.timestamp_ns or time.time_ns(),
-        )
-        self._shm.buf[:_STRUCT_SIZE] = packed
+        # Mark write-in-progress (odd).
+        self._seq = (self._seq + 1) & 0xFFFFFFFF
+        struct.pack_into(_SEQ_FMT, self._shm.buf, 0, self._seq)
+        _memory_fence()
+
+        try:
+            packed = struct.pack(
+                _STRUCT_FMT,
+                data.frame_counter,
+                data.num_faces,
+                data.face_distance_cm,
+                data.gaze_screen_x,
+                data.gaze_screen_y,
+                data.gaze_confidence,
+                data.head_yaw,
+                data.head_pitch,
+                data.timestamp_ns or time.time_ns(),
+            )
+            self._shm.buf[_SEQ_SIZE:_TOTAL_SHM_SIZE] = packed
+        finally:
+            _memory_fence()
+            # Mark write-complete (even) — even on error, to avoid
+            # permanently blocking readers with a stuck odd counter.
+            self._seq = (self._seq + 1) & 0xFFFFFFFF
+            struct.pack_into(_SEQ_FMT, self._shm.buf, 0, self._seq)
 
     def close(self) -> None:
         self._shm.close()
         try:
             self._shm.unlink()
-        except FileNotFoundError:
+        except Exception:
             pass
 
 
@@ -65,10 +106,17 @@ class VisionShmReader:
 
     def __init__(self) -> None:
         self._shm: Optional[shared_memory.SharedMemory] = None
-        self._last_frame: int = 0
+        self._last_frame: Optional[int] = None
 
     def connect(self, timeout: float = 10.0) -> bool:
         """Attempt to attach to vision shared memory segment."""
+        if self._shm is not None:
+            try:
+                self._shm.close()
+            except Exception:
+                pass
+            self._shm = None
+
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -81,12 +129,33 @@ class VisionShmReader:
         return False
 
     def read(self) -> Optional[FaceData]:
-        """Read latest vision data. Returns None if no new frame."""
+        """Read latest vision data. Returns None if no new frame or torn read."""
         if self._shm is None:
             return None
-        values = struct.unpack(_STRUCT_FMT, bytes(self._shm.buf[:_STRUCT_SIZE]))
+
+        try:
+            # --- Seqlock read protocol ---
+            seq1 = struct.unpack_from(_SEQ_FMT, self._shm.buf, 0)[0]
+            if seq1 & 1:
+                # Writer is mid-update — skip this cycle.
+                return None
+            _memory_fence()
+
+            raw = bytes(self._shm.buf[_SEQ_SIZE:_TOTAL_SHM_SIZE])
+            _memory_fence()
+
+            seq2 = struct.unpack_from(_SEQ_FMT, self._shm.buf, 0)[0]
+            if seq1 != seq2:
+                # Data was modified during our read — torn read.
+                return None
+        except (BufferError, ValueError, OSError):
+            # Shared memory segment was deallocated (vision process crashed).
+            self._shm = None
+            return None
+
+        values = struct.unpack(_STRUCT_FMT, raw)
         frame_counter = values[0]
-        if frame_counter == self._last_frame:
+        if self._last_frame is not None and frame_counter == self._last_frame:
             return None  # no new data
         self._last_frame = frame_counter
         return FaceData(

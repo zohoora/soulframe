@@ -9,11 +9,10 @@ memory at ~30 Hz.
 """
 
 import logging
+import queue
 import time
 from multiprocessing import Queue
-from typing import Any
-
-import numpy as np
+from typing import Any, Dict, List, Optional
 
 from soulframe.shared.ipc import VisionShmWriter
 from soulframe.shared.types import FaceData
@@ -29,7 +28,7 @@ logger = logging.getLogger(__name__)
 _TARGET_PERIOD = 1.0 / 30.0
 
 
-def _select_primary_face(faces: list[dict[str, Any]]) -> dict[str, Any]:
+def _select_primary_face(faces: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Pick the largest (closest) detected face."""
     return max(faces, key=lambda f: f["bbox"][2] * f["bbox"][3])
 
@@ -44,38 +43,44 @@ def run_vision_process(cmd_queue: Queue) -> None:  # type: ignore[type-arg]
     logger.info("Vision process starting.")
 
     # -- Initialise components -----------------------------------------
-    camera: CameraCapture | None = None
-    shm_writer: VisionShmWriter | None = None
+    camera: Optional[CameraCapture] = None
+    shm_writer: Optional[VisionShmWriter] = None
 
     try:
+        shm_writer = VisionShmWriter()
         camera = CameraCapture()
         detector = FaceDetector()
         gaze_estimator = GazeEstimator()
         distance_estimator = DistanceEstimator()
         screen_mapper = ScreenMapper()
-        shm_writer = VisionShmWriter()
     except Exception:
         logger.exception("Failed to initialise vision components.")
         if camera is not None:
             camera.release()
+        if shm_writer is not None:
+            try:
+                shm_writer.close()
+            except Exception:
+                pass
         return
 
     logger.info("Vision pipeline ready — entering main loop.")
 
     # -- Main loop -----------------------------------------------------
+    frame_counter = 0
     try:
         while True:
             loop_start = time.monotonic()
 
             # Check for commands from the parent process.
-            try:
-                while not cmd_queue.empty():
+            while True:
+                try:
                     cmd = cmd_queue.get_nowait()
-                    if cmd == "SHUTDOWN":
-                        logger.info("SHUTDOWN command received.")
-                        return
-            except Exception:
-                pass  # queue might raise on process teardown
+                except queue.Empty:
+                    break
+                if cmd == "SHUTDOWN":
+                    logger.info("SHUTDOWN command received.")
+                    return
 
             # 1. Grab frame
             success, frame = camera.read()
@@ -94,11 +99,10 @@ def run_vision_process(cmd_queue: Queue) -> None:  # type: ignore[type-arg]
 
             if not faces:
                 # Write zero-face data so brain knows there's no detection
-                fc = getattr(run_vision_process, "_fc", 0) + 1
-                run_vision_process._fc = fc
+                frame_counter = (frame_counter + 1) & 0xFFFFFFFF
                 try:
                     shm_writer.write(FaceData(
-                        frame_counter=fc,
+                        frame_counter=frame_counter,
                         num_faces=0,
                         timestamp_ns=time.time_ns(),
                     ))
@@ -130,23 +134,24 @@ def run_vision_process(cmd_queue: Queue) -> None:  # type: ignore[type-arg]
                 )
             except Exception:
                 logger.debug("Distance estimation error.", exc_info=True)
-                distance_cm = 0.0
+                distance_cm = 999.0
+            # Cap unreasonable distances (tiny bbox artifacts)
+            distance_cm = max(1.0, min(distance_cm, 999.0))
 
             # 5. Map gaze to screen coordinates
             try:
                 screen_x, screen_y = screen_mapper.map_gaze(
                     gaze["gaze_yaw"],
                     gaze["gaze_pitch"],
-                    head_yaw=gaze["gaze_yaw"],
-                    head_pitch=gaze["gaze_pitch"],
+                    head_yaw=gaze.get("head_yaw", gaze["gaze_yaw"]),
+                    head_pitch=gaze.get("head_pitch", gaze["gaze_pitch"]),
                 )
             except Exception:
                 logger.debug("Screen mapping error.", exc_info=True)
                 screen_x, screen_y = 0.5, 0.5
 
             # 6. Pack into FaceData and write to shared memory
-            frame_counter = getattr(run_vision_process, "_fc", 0) + 1
-            run_vision_process._fc = frame_counter
+            frame_counter = (frame_counter + 1) & 0xFFFFFFFF
             try:
                 face_data = FaceData(
                     frame_counter=frame_counter,
@@ -155,8 +160,8 @@ def run_vision_process(cmd_queue: Queue) -> None:  # type: ignore[type-arg]
                     gaze_screen_x=screen_x,
                     gaze_screen_y=screen_y,
                     gaze_confidence=gaze["confidence"],
-                    head_yaw=gaze["gaze_yaw"],
-                    head_pitch=gaze["gaze_pitch"],
+                    head_yaw=gaze.get("head_yaw", gaze["gaze_yaw"]),
+                    head_pitch=gaze.get("head_pitch", gaze["gaze_pitch"]),
                     timestamp_ns=time.time_ns(),
                 )
                 shm_writer.write(face_data)

@@ -46,6 +46,7 @@ class Renderer:
         self._window = window
         self._time_start = time.monotonic()
         self._elapsed_time = 0.0
+        self._global_time_start = time.monotonic()
 
         # Crossfade state
         self._crossfade_progress = 1.0  # 1.0 = fully showing current texture
@@ -68,6 +69,8 @@ class Renderer:
         # Texture slots
         self._texture_current = None
         self._texture_prev = None
+        self._textures_to_delete = [[], [], []]
+        self._delete_ring_index = 0
 
         # Create a 1x1 white fallback texture
         self._fallback_texture = self._create_fallback_texture()
@@ -88,7 +91,7 @@ class Renderer:
 
     def _create_fallback_texture(self):
         """Create a 1x1 white texture as a fallback."""
-        tex = pyglet.image.ImageData(1, 1, "RGBA", bytes([255, 255, 255, 255])).get_texture()
+        tex = pyglet.image.ImageData(1, 1, "RGBA", bytes([0, 0, 0, 255])).get_texture()
         return tex
 
     def _load_texture_from_path(self, image_path: str):
@@ -126,12 +129,17 @@ class Renderer:
         if texture is None:
             return
 
+        # Defer deletion of old previous texture (GPU may still be using it)
+        if self._texture_prev is not None and self._texture_prev is not self._fallback_texture:
+            self._textures_to_delete[self._delete_ring_index].append(self._texture_prev)
+
         # Shift current to previous for potential crossfade
         self._texture_prev = self._texture_current
         self._texture_current = texture
         # No crossfade — immediate switch
         self._crossfade_progress = 1.0
         self._crossfading = False
+        self._time_start = time.monotonic()
         logger.info("Image loaded (immediate): %s", image_path)
 
     def crossfade_to(self, image_path: str, duration_ms: float):
@@ -145,14 +153,32 @@ class Renderer:
         if texture is None:
             return
 
+        # If a crossfade is already in progress, snap it to completion
+        # so the current partially-blended state doesn't cause a visual pop.
+        if self._crossfading:
+            self._crossfade_progress = 1.0
+            self._crossfading = False
+
+        # Defer deletion of old previous texture (GPU may still be using it)
+        if self._texture_prev is not None and self._texture_prev is not self._fallback_texture:
+            self._textures_to_delete[self._delete_ring_index].append(self._texture_prev)
+
         # Shift current to previous
         self._texture_prev = self._texture_current
         self._texture_current = texture
 
         # Start crossfade
         self._crossfade_duration = duration_ms / 1000.0  # convert to seconds
+        if self._crossfade_duration <= 0:
+            self._crossfade_progress = 1.0
+            self._crossfading = False
+            self._time_start = time.monotonic()
+            logger.info("Image loaded (zero-duration crossfade): %s", image_path)
+            return
         self._crossfade_progress = 0.0
         self._crossfading = True
+        # Reset Ken Burns timer for the new image
+        self._time_start = time.monotonic()
         logger.info(
             "Crossfade started to: %s (duration: %.1f ms)", image_path, duration_ms
         )
@@ -166,8 +192,22 @@ class Renderer:
             gaze_y: Normalized gaze Y position (0-1).
             dt: Delta time in seconds since last frame.
         """
-        # Update time
-        self._elapsed_time = time.monotonic() - self._time_start
+        # Update time (single clock read to avoid skew)
+        now = time.monotonic()
+        self._elapsed_time = now - self._time_start
+        global_elapsed = now - self._global_time_start
+
+        # Advance the ring index FIRST, then delete the oldest slot.
+        # This ensures newly-added textures survive at least 2 more frames
+        # before their slot comes around for deletion.
+        self._delete_ring_index = (self._delete_ring_index + 1) % 3
+        old_slot = self._delete_ring_index
+        for tex in self._textures_to_delete[old_slot]:
+            try:
+                tex.delete()
+            except Exception:
+                pass
+        self._textures_to_delete[old_slot] = []
 
         # Update crossfade
         if self._crossfading:
@@ -207,6 +247,7 @@ class Renderer:
             self._set_uniform("u_time", self._elapsed_time)
             self._set_uniform("u_gaze_pos", (gaze_x, gaze_y))
             self._set_uniform("u_crossfade", self._crossfade_progress)
+            self._set_uniform("u_time_global", global_elapsed)
 
             # Set effect uniforms
             for name, value in effect_uniforms.items():
@@ -232,4 +273,4 @@ class Renderer:
             # Uniform not found in shader — may be optimized out
             pass
         except Exception:
-            logger.debug("Could not set uniform '%s'", name, exc_info=True)
+            logger.debug("Failed to set uniform '%s': %s", name, value, exc_info=True)

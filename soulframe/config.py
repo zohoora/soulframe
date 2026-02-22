@@ -14,6 +14,7 @@ CALIBRATION_DIR = PROJECT_ROOT / "calibration"
 DISPLAY_WIDTH = 1920
 DISPLAY_HEIGHT = 1080
 DISPLAY_FPS = 60
+DISPLAY_SCREEN_INDEX = 0
 
 # ── Camera ─────────────────────────────────────────────────────────────────
 CAMERA_INDEX = 0          # /dev/video0
@@ -26,7 +27,8 @@ FACE_DETECTION_CONFIDENCE = 0.5
 GAZE_MODEL_PATH = MODELS_DIR / "gaze_model.onnx"
 GAZE_ENGINE_PATH = MODELS_DIR / "gaze_model.engine"
 VISION_SHM_NAME = "soulframe_vision"
-VISION_SHM_SIZE = 40      # bytes, see shared/ipc.py
+VISION_SHM_SIZE = 44      # bytes (4 seqlock + 40 data), see shared/ipc.py
+VISION_STALE_TIMEOUT_S = 2.0  # expire stale vision data after this many seconds
 
 # ── Audio ──────────────────────────────────────────────────────────────────
 AUDIO_SAMPLE_RATE = 44100
@@ -56,5 +58,6 @@ DEFAULT_FADE_OUT_MS = 2000
 DEFAULT_AUDIO_CROSSFADE_MS = 3000
 
 # ── Authoring Server ──────────────────────────────────────────────────────
-AUTHORING_HOST = "0.0.0.0"
-AUTHORING_PORT = 8080
+AUTHORING_HOST = os.environ.get("SOULFRAME_AUTHORING_HOST", "127.0.0.1")
+AUTHORING_PORT = int(os.environ.get("SOULFRAME_AUTHORING_PORT", "8080"))
+AUTHORING_API_KEY = os.environ.get("SOULFRAME_API_KEY", "")

@@ -3,13 +3,26 @@ Pydantic models for Soul Frame image metadata.
 Matches the metadata.json schema from the Soul Frame spec.
 """
 
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any, Tuple
+from pydantic import BaseModel, Field, field_validator
+from typing import List, Optional, Dict, Any
 
 
 class RegionShapeModel(BaseModel):
     type: str = "polygon"
     points_normalized: List[List[float]] = []
+
+    @field_validator("points_normalized")
+    @classmethod
+    def validate_points(cls, points):
+        for point in points:
+            if len(point) != 2:
+                raise ValueError("Each point must have exactly 2 coordinates")
+            x, y = point
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                raise ValueError(
+                    f"Point coordinates must be in [0, 1], got ({x}, {y})"
+                )
+        return points
 
 
 class GazeTriggerModel(BaseModel):
@@ -63,7 +76,7 @@ class ImageInfoModel(BaseModel):
     height: int = 1080
 
 
-class InteractionModel(BaseModel):
+class InteractionSettingsModel(BaseModel):
     min_interaction_distance_cm: float = 300.0
     close_interaction_distance_cm: float = 80.0
 
@@ -81,5 +94,5 @@ class ImageMetadataModel(BaseModel):
     image: ImageInfoModel = ImageInfoModel()
     audio: AudioModel = AudioModel()
     regions: List[RegionModel] = []
-    interaction: InteractionModel = InteractionModel()
+    interaction: InteractionSettingsModel = InteractionSettingsModel()
     transitions: TransitionsModel = TransitionsModel()

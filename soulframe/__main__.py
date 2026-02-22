@@ -14,6 +14,12 @@ import sys
 
 
 def main() -> None:
+    import multiprocessing
+    try:
+        multiprocessing.set_start_method("spawn")
+    except RuntimeError:
+        pass  # already set
+
     parser = argparse.ArgumentParser(
         prog="soulframe",
         description="Soul Frame — interactive art installation",

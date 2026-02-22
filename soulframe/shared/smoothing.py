@@ -1,7 +1,7 @@
 """Signal smoothing filters for gaze and distance data."""
 
 import math
-from typing import Optional
+from typing import Optional, Tuple
 
 
 class EMAFilter:
@@ -16,6 +16,8 @@ class EMAFilter:
         self._value: Optional[float] = None
 
     def update(self, measurement: float) -> float:
+        if not math.isfinite(measurement):
+            return self._value if self._value is not None else 0.0
         if self._value is None:
             self._value = measurement
         else:
@@ -46,6 +48,8 @@ class SimpleKalmanFilter:
         self._p: float = 1.0             # estimation error covariance
 
     def update(self, measurement: float) -> float:
+        if not math.isfinite(measurement):
+            return self._x if self._x is not None else 0.0
         if self._x is None:
             self._x = measurement
             self._p = self._r
@@ -55,7 +59,10 @@ class SimpleKalmanFilter:
         self._p += self._q
 
         # Update
-        k = self._p / (self._p + self._r)  # Kalman gain
+        denom = self._p + self._r
+        if denom == 0.0:
+            return self._x
+        k = self._p / denom  # Kalman gain
         self._x += k * (measurement - self._x)
         self._p *= (1 - k)
 
@@ -77,7 +84,7 @@ class GazeSmoother:
         self._x_filter = EMAFilter(alpha)
         self._y_filter = EMAFilter(alpha)
 
-    def update(self, x: float, y: float) -> tuple:
+    def update(self, x: float, y: float) -> Tuple[float, float]:
         sx = self._x_filter.update(x)
         sy = self._y_filter.update(y)
         return sx, sy

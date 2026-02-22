@@ -9,7 +9,7 @@ Priority order:
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Tuple
 
 import cv2
 import numpy as np
@@ -112,8 +112,8 @@ class GazeEstimator:
     def estimate(
         self,
         frame: np.ndarray,
-        face_landmarks: dict[str, tuple[float, float]],
-    ) -> dict[str, Any]:
+        face_landmarks: Dict[str, Tuple[float, float]],
+    ) -> Dict[str, Any]:
         """Estimate gaze from *frame* and normalised *face_landmarks*.
 
         Returns:
@@ -134,8 +134,8 @@ class GazeEstimator:
     def _estimate_tensorrt(
         self,
         frame: np.ndarray,
-        face_landmarks: dict[str, tuple[float, float]],
-    ) -> dict[str, Any]:
+        face_landmarks: Dict[str, Tuple[float, float]],
+    ) -> Dict[str, Any]:
         # Placeholder — delegates to headpose until a real engine is
         # integrated.
         return self._estimate_headpose(frame, face_landmarks)
@@ -147,8 +147,8 @@ class GazeEstimator:
     def _estimate_onnx(
         self,
         frame: np.ndarray,
-        face_landmarks: dict[str, tuple[float, float]],
-    ) -> dict[str, Any]:
+        face_landmarks: Dict[str, Tuple[float, float]],
+    ) -> Dict[str, Any]:
         # A real pipeline would crop the eye region, resize, normalise,
         # and run inference.  For now fall through to headpose.
         return self._estimate_headpose(frame, face_landmarks)
@@ -160,20 +160,20 @@ class GazeEstimator:
     def _estimate_headpose(
         self,
         frame: np.ndarray,
-        face_landmarks: dict[str, tuple[float, float]],
-    ) -> dict[str, Any]:
+        face_landmarks: Dict[str, Tuple[float, float]],
+    ) -> Dict[str, Any]:
         h, w = frame.shape[:2]
 
         # Build matching 2D / 3D point arrays from available landmarks.
-        pts_2d: list[list[float]] = []
-        pts_3d: list[list[float]] = []
+        pts_2d: List[List[float]] = []
+        pts_3d: List[List[float]] = []
 
         for order_list, model_pts in [
             (_LANDMARK_ORDER_FULL, FACE_3D_MODEL),
             (_LANDMARK_ORDER_MINIMAL, FACE_3D_MODEL_MINIMAL),
         ]:
-            pts_2d_tmp: list[list[float]] = []
-            pts_3d_tmp: list[list[float]] = []
+            pts_2d_tmp: List[List[float]] = []
+            pts_3d_tmp: List[List[float]] = []
             for idx, name in enumerate(order_list):
                 if name in face_landmarks:
                     lx, ly = face_landmarks[name]

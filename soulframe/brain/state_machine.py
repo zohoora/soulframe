@@ -22,16 +22,29 @@ class InteractionStateMachine:
 
         # Timers (accumulated seconds)
         self._face_lost_timer: float = 0.0
-        self._gaze_region_timer: float = 0.0
         self._gaze_away_timer: float = 0.0
         self._withdraw_timer: float = 0.0
         self._idle_image_timer: float = 0.0
 
         self._should_cycle_image: bool = False
 
+        # Per-image distance thresholds (overridden by image metadata)
+        self._presence_distance_cm: float = config.PRESENCE_DISTANCE_CM
+        self._close_distance_cm: float = config.CLOSE_INTERACTION_DISTANCE_CM
+        self._withdraw_duration_s: float = config.WITHDRAW_FADE_DURATION_S
+
         self.on_state_change: Optional[
             Callable[[InteractionState, InteractionState], None]
         ] = None
+
+    def set_distance_thresholds(self, presence_cm: float, close_cm: float) -> None:
+        """Set per-image distance thresholds."""
+        self._presence_distance_cm = presence_cm
+        self._close_distance_cm = close_cm
+
+    def set_withdraw_duration(self, duration_s: float) -> None:
+        """Set the withdraw fade duration for the current image."""
+        self._withdraw_duration_s = max(0.1, duration_s)
 
     @property
     def state(self) -> InteractionState:
@@ -46,6 +59,8 @@ class InteractionStateMachine:
         face_data: FaceData,
         active_regions: List[str],
         dt: float,
+        dwell_regions: Optional[List[str]] = None,
+        min_active_confidence: float = 0.0,
     ) -> InteractionState:
         face_detected = face_data.num_faces > 0
         distance_cm = face_data.face_distance_cm if face_detected else float("inf")
@@ -57,18 +72,22 @@ class InteractionStateMachine:
         else:
             self._face_lost_timer += dt
 
-        if active_regions and gaze_confidence >= config.GAZE_MIN_CONFIDENCE:
-            self._gaze_region_timer += dt
+        # Use the per-region threshold if we're in an engaged state and
+        # have a meaningful min_active_confidence, otherwise fall back to global.
+        gaze_threshold = config.GAZE_MIN_CONFIDENCE
+        if (self._state in (InteractionState.ENGAGED, InteractionState.CLOSE_INTERACTION)
+                and min_active_confidence > 0.0):
+            gaze_threshold = min_active_confidence
+        if active_regions and gaze_confidence >= gaze_threshold:
             self._gaze_away_timer = 0.0
         else:
-            self._gaze_region_timer = 0.0
             self._gaze_away_timer += dt
 
         # Per-state transition logic
         if self._state == InteractionState.IDLE:
             self._update_idle(face_detected, distance_cm, dt)
         elif self._state == InteractionState.PRESENCE:
-            self._update_presence(face_detected, gaze_confidence, active_regions)
+            self._update_presence(face_detected, distance_cm, gaze_confidence, active_regions, dwell_regions)
         elif self._state == InteractionState.ENGAGED:
             self._update_engaged(face_detected, distance_cm)
         elif self._state == InteractionState.CLOSE_INTERACTION:
@@ -83,7 +102,6 @@ class InteractionStateMachine:
         self._state = InteractionState.IDLE
         self._state_entry_time = time.monotonic()
         self._face_lost_timer = 0.0
-        self._gaze_region_timer = 0.0
         self._gaze_away_timer = 0.0
         self._withdraw_timer = 0.0
         self._idle_image_timer = 0.0
@@ -102,12 +120,14 @@ class InteractionStateMachine:
         logger.info("State transition: %s -> %s", old.name, new_state.name)
         self._state = new_state
         self._state_entry_time = time.monotonic()
+        # Always clear the cycle flag when leaving IDLE to prevent
+        # a race where the flag was set in the same tick as a transition.
+        self._should_cycle_image = False
         if new_state == InteractionState.IDLE:
             self._idle_image_timer = 0.0
-            self._should_cycle_image = False
-        elif new_state == InteractionState.PRESENCE:
-            self._gaze_region_timer = 0.0
-        elif new_state in (InteractionState.ENGAGED, InteractionState.CLOSE_INTERACTION):
+        elif new_state == InteractionState.ENGAGED and old != InteractionState.CLOSE_INTERACTION:
+            # Only reset gaze-away timer when first entering ENGAGED from PRESENCE,
+            # not when oscillating back from CLOSE_INTERACTION.
             self._gaze_away_timer = 0.0
         elif new_state == InteractionState.WITHDRAWING:
             self._withdraw_timer = 0.0
@@ -115,6 +135,9 @@ class InteractionStateMachine:
             self.on_state_change(old, new_state)
 
     def _update_idle(self, face_detected: bool, distance_cm: float, dt: float) -> None:
+        if face_detected and distance_cm < self._presence_distance_cm:
+            self._set_state(InteractionState.PRESENCE)
+            return
         self._idle_image_timer += dt
         if self._idle_image_timer >= config.IDLE_IMAGE_CYCLE_SECONDS:
             self._should_cycle_image = True
@@ -122,28 +145,26 @@ class InteractionStateMachine:
         else:
             self._should_cycle_image = False
 
-        if face_detected and distance_cm < config.PRESENCE_DISTANCE_CM:
-            self._set_state(InteractionState.PRESENCE)
-
     def _update_presence(
-        self, face_detected: bool, gaze_confidence: float, active_regions: List[str]
+        self, face_detected: bool, distance_cm: float, gaze_confidence: float,
+        active_regions: List[str], dwell_regions: Optional[List[str]] = None,
     ) -> None:
         if self._face_lost_timer >= config.PRESENCE_LOST_TIMEOUT_S:
-            self._set_state(InteractionState.IDLE)
+            self._set_state(InteractionState.WITHDRAWING)
             return
-        gaze_dwell_s = config.GAZE_DWELL_MS / 1000.0
-        if (
-            active_regions
-            and gaze_confidence >= config.GAZE_MIN_CONFIDENCE
-            and self._gaze_region_timer >= gaze_dwell_s
-        ):
+        if face_detected and distance_cm >= self._presence_distance_cm:
+            self._set_state(InteractionState.WITHDRAWING)
+            return
+        # Transition to ENGAGED only when at least one region has satisfied
+        # its per-region dwell threshold (reported via dwell_regions).
+        if dwell_regions:
             self._set_state(InteractionState.ENGAGED)
 
     def _update_engaged(self, face_detected: bool, distance_cm: float) -> None:
         if self._face_lost_timer >= config.IDLE_FACE_LOST_TIMEOUT_S:
             self._set_state(InteractionState.WITHDRAWING)
             return
-        if face_detected and distance_cm < config.CLOSE_INTERACTION_DISTANCE_CM:
+        if face_detected and distance_cm < self._close_distance_cm:
             self._set_state(InteractionState.CLOSE_INTERACTION)
             return
         if self._gaze_away_timer >= config.WITHDRAW_GAZE_AWAY_TIMEOUT_S:
@@ -156,11 +177,11 @@ class InteractionStateMachine:
         if self._gaze_away_timer >= config.WITHDRAW_GAZE_AWAY_TIMEOUT_S:
             self._set_state(InteractionState.WITHDRAWING)
             return
-        hysteresis_cm = config.CLOSE_INTERACTION_DISTANCE_CM * 1.5
+        hysteresis_cm = min(self._close_distance_cm * 1.5, self._presence_distance_cm)
         if face_detected and distance_cm > hysteresis_cm:
             self._set_state(InteractionState.ENGAGED)
 
     def _update_withdrawing(self, dt: float) -> None:
         self._withdraw_timer += dt
-        if self._withdraw_timer >= config.WITHDRAW_FADE_DURATION_S:
+        if self._withdraw_timer >= self._withdraw_duration_s:
             self._set_state(InteractionState.IDLE)

@@ -9,6 +9,7 @@ uniform sampler2D u_texture_prev;
 
 // Global
 uniform float u_time;
+uniform float u_time_global;      // never reset — for breathing continuity
 uniform vec2 u_gaze_pos;
 uniform float u_crossfade;          // 0 = fully previous, 1 = fully current
 
@@ -36,10 +37,17 @@ uniform float u_vignette_radius;    // ~0.75
 
 // Apply Ken Burns: slow zoom + pan
 vec2 apply_kenburns(vec2 uv) {
-    float zoom = 1.0 + u_time * u_kb_zoom_speed * u_kb_intensity;
+    // Periodic zoom: oscillates between 1.0 and 1.0 + max_zoom
+    float max_zoom = 0.08 * u_kb_intensity;
+    float zoom_phase = u_time * u_kb_zoom_speed * 3.14159;
+    float zoom = 1.0 + max_zoom * (0.5 + 0.5 * sin(zoom_phase));
     vec2 center = vec2(0.5, 0.5);
     uv = center + (uv - center) / zoom;
-    vec2 pan_offset = u_kb_pan_dir * u_time * u_kb_zoom_speed * 0.5 * u_kb_intensity;
+    // Periodic pan, clamped within the zoom margin
+    float margin = 0.5 - 0.5 / zoom;
+    float pan_phase = u_time * u_kb_zoom_speed * 0.5;
+    vec2 pan_offset = u_kb_pan_dir * sin(pan_phase * 6.2831853) * u_kb_intensity;
+    pan_offset = clamp(pan_offset, vec2(-margin), vec2(margin));
     uv += pan_offset;
     return uv;
 }
@@ -57,7 +65,7 @@ vec2 apply_breathing(vec2 uv) {
     vec2 delta = uv - u_breath_center;
     float dist = length(delta);
     float falloff = 1.0 - smoothstep(u_breath_radius * 0.6, u_breath_radius, dist);
-    float breath = sin(u_time * u_breath_frequency * 6.2831853) * u_breath_amplitude;
+    float breath = sin(u_time_global * u_breath_frequency * 6.2831853) * u_breath_amplitude;
     float strength = breath * falloff * u_breath_intensity;
     uv = u_breath_center + delta * (1.0 + strength);
     return uv;
@@ -84,16 +92,19 @@ void main() {
     // 3. Breathing (subtle pulsing around region)
     uv = apply_breathing(uv);
 
-    // 4. Sample the current texture with distorted UVs
+    // 4. Clamp UVs to avoid edge artifacts
+    uv = clamp(uv, 0.0, 1.0);
+
+    // 5. Sample the current texture with distorted UVs
     vec4 color_current = texture(u_texture, uv);
 
-    // 5. Vignette darkening
+    // 6. Vignette darkening
     float vignette_factor = compute_vignette();
     color_current.rgb *= vignette_factor;
 
-    // 6. Crossfade with previous texture
-    // For the previous texture, apply the same UV distortions for consistency
-    vec4 color_prev = texture(u_texture_prev, uv);
+    // 7. Crossfade — previous texture uses clean UVs (no distortion from new image's effects)
+    vec2 prev_uv = clamp(v_texcoord, 0.0, 1.0);
+    vec4 color_prev = texture(u_texture_prev, prev_uv);
     color_prev.rgb *= vignette_factor;
 
     fragColor = mix(color_prev, color_current, u_crossfade);

@@ -3,12 +3,14 @@ FastAPI router for Soul Frame authoring API.
 Provides CRUD operations for gallery images and their metadata.
 """
 
+import asyncio
 import json
+import logging
 import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import aiofiles
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
@@ -20,9 +22,11 @@ from authoring.backend.models import (
     ImageMetadataModel,
     ImageInfoModel,
     AudioModel,
-    InteractionModel,
+    InteractionSettingsModel,
     TransitionsModel,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -31,35 +35,91 @@ GALLERY_DIR = config.GALLERY_DIR
 ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
 ALLOWED_AUDIO_EXTENSIONS = {".wav", ".mp3", ".ogg", ".flac", ".aac"}
 
+MAX_IMAGE_UPLOAD_BYTES = 50 * 1024 * 1024   # 50 MB
+MAX_AUDIO_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
+_UPLOAD_CHUNK_SIZE = 1024 * 1024             # 1 MB read chunks
+
 
 def _get_image_dir(image_id: str) -> Path:
-    """Return the directory path for a given image id."""
-    path = GALLERY_DIR / image_id
+    """Return the directory path for a given image id.
+
+    Validates that image_id does not escape the gallery directory
+    (prevents path traversal attacks via crafted IDs like ``../../etc``).
+    """
+    # Reject path separators, traversal components, and hidden directories
+    if "/" in image_id or "\\" in image_id or image_id.startswith("."):
+        raise HTTPException(status_code=400, detail="Invalid image ID")
+
+    path = (GALLERY_DIR / image_id).resolve()
+
+    # Ensure the resolved path is actually inside GALLERY_DIR
+    gallery_resolved = GALLERY_DIR.resolve()
+    if not str(path).startswith(str(gallery_resolved) + os.sep) and path != gallery_resolved:
+        raise HTTPException(status_code=400, detail="Invalid image ID")
+
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Image '{image_id}' not found")
     return path
 
 
-def _read_metadata(image_dir: Path) -> dict:
+async def _read_metadata(image_dir: Path) -> dict:
     """Read and parse metadata.json from an image directory."""
     meta_path = image_dir / "metadata.json"
     if not meta_path.exists():
         return {}
-    with open(meta_path, "r") as f:
-        return json.load(f)
+    try:
+        async with aiofiles.open(str(meta_path), "r") as f:
+            content = await f.read()
+        return json.loads(content)
+    except (json.JSONDecodeError, ValueError, OSError):
+        logger.warning("Failed to read metadata.json in %s", image_dir.name)
+        return {}
 
 
 async def _write_metadata(image_dir: Path, data: dict) -> None:
-    """Write metadata dict to metadata.json in the image directory."""
+    """Write metadata dict to metadata.json atomically."""
     meta_path = image_dir / "metadata.json"
-    async with aiofiles.open(str(meta_path), "w") as f:
+    tmp_path = image_dir / "metadata.json.tmp"
+    async with aiofiles.open(str(tmp_path), "w") as f:
         await f.write(json.dumps(data, indent=2))
 
+    # Blocking fsync + rename are offloaded to thread pool to avoid
+    # stalling the event loop.
+    def _sync_and_rename() -> None:
+        fd = os.open(str(tmp_path), os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.replace(str(tmp_path), str(meta_path))
 
-def _find_image_file(image_dir: Path) -> str | None:
-    """Find the main image file in a directory."""
-    for ext in ALLOWED_IMAGE_EXTENSIONS:
-        for file in image_dir.iterdir():
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, _sync_and_rename)
+
+
+async def _find_image_file(image_dir: Path) -> Optional[str]:
+    """Find the main image file in a directory.
+
+    Prefers the filename specified in metadata.json, falls back to
+    scanning for any image file by extension.
+    """
+    # Try metadata first
+    meta = await _read_metadata(image_dir)
+    if meta:
+        meta_filename = meta.get("image", {}).get("filename", "")
+        if meta_filename:
+            resolved = (image_dir / meta_filename).resolve()
+            if (str(resolved).startswith(str(image_dir.resolve()) + os.sep)
+                    and resolved.is_file()):
+                return meta_filename
+            elif meta_filename:
+                logger.warning(
+                    "Metadata filename escapes image dir: %s", meta_filename
+                )
+
+    # Fallback: scan for any image file
+    for ext in sorted(ALLOWED_IMAGE_EXTENSIONS):
+        for file in sorted(image_dir.iterdir()):
             if file.suffix.lower() == ext and file.is_file():
                 return file.name
     return None
@@ -85,7 +145,7 @@ async def list_images():
             continue
 
         image_id = entry.name
-        meta = _read_metadata(entry)
+        meta = await _read_metadata(entry)
         has_metadata = bool(meta)
         title = meta.get("title", image_id) if meta else image_id
         thumbnail_url = _make_thumbnail_url(image_id)
@@ -107,10 +167,10 @@ async def list_images():
 async def get_image(image_id: str):
     """Return the full metadata.json contents for an image."""
     image_dir = _get_image_dir(image_id)
-    meta = _read_metadata(image_dir)
+    meta = await _read_metadata(image_dir)
     if not meta:
         # Return a default metadata scaffold
-        image_file = _find_image_file(image_dir)
+        image_file = await _find_image_file(image_dir)
         width, height = 1920, 1080
         if image_file:
             try:
@@ -179,12 +239,26 @@ async def create_image(
     # Create audio subdirectory
     (image_dir / "audio").mkdir(exist_ok=True)
 
-    # Save the uploaded image
+    # Save the uploaded image (chunked to limit memory usage)
     dest_filename = f"image{ext}"
     dest_path = image_dir / dest_filename
-    async with aiofiles.open(str(dest_path), "wb") as f:
-        content = await file.read()
-        await f.write(content)
+    total_written = 0
+    try:
+        async with aiofiles.open(str(dest_path), "wb") as f:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_written += len(chunk)
+                if total_written > MAX_IMAGE_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Image file exceeds maximum size of {MAX_IMAGE_UPLOAD_BYTES // (1024*1024)} MB",
+                    )
+                await f.write(chunk)
+    except HTTPException:
+        shutil.rmtree(image_dir, ignore_errors=True)
+        raise
 
     # Determine image dimensions
     width, height = 1920, 1080
@@ -202,7 +276,7 @@ async def create_image(
         image=ImageInfoModel(filename=dest_filename, width=width, height=height),
         audio=AudioModel(),
         regions=[],
-        interaction=InteractionModel(),
+        interaction=InteractionSettingsModel(),
         transitions=TransitionsModel(),
     )
     await _write_metadata(image_dir, metadata.model_dump())
@@ -229,11 +303,27 @@ async def upload_audio(image_id: str, file: UploadFile = File(...)):
     audio_dir.mkdir(exist_ok=True)
 
     safe_name = Path(file.filename).name if file.filename else f"audio{ext}"
-    dest_path = audio_dir / safe_name
+    dest_path = (audio_dir / safe_name).resolve()
+    if not str(dest_path).startswith(str(audio_dir.resolve()) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid audio filename")
 
-    async with aiofiles.open(str(dest_path), "wb") as f:
-        content = await file.read()
-        await f.write(content)
+    total_written = 0
+    try:
+        async with aiofiles.open(str(dest_path), "wb") as f:
+            while True:
+                chunk = await file.read(_UPLOAD_CHUNK_SIZE)
+                if not chunk:
+                    break
+                total_written += len(chunk)
+                if total_written > MAX_AUDIO_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Audio file exceeds maximum size of {MAX_AUDIO_UPLOAD_BYTES // (1024*1024)} MB",
+                    )
+                await f.write(chunk)
+    except HTTPException:
+        dest_path.unlink(missing_ok=True)
+        raise
 
     return {
         "status": "ok",
@@ -249,7 +339,8 @@ async def upload_audio(image_id: str, file: UploadFile = File(...)):
 async def delete_image(image_id: str):
     """Delete an image entry and its entire directory."""
     image_dir = _get_image_dir(image_id)
-    shutil.rmtree(image_dir)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, shutil.rmtree, image_dir)
     return {"status": "deleted", "id": image_id}
 
 
@@ -260,11 +351,13 @@ async def delete_image(image_id: str):
 async def get_image_file(image_id: str):
     """Serve the actual image file for rendering on the Konva canvas."""
     image_dir = _get_image_dir(image_id)
-    image_file = _find_image_file(image_dir)
+    image_file = await _find_image_file(image_dir)
     if not image_file:
         raise HTTPException(status_code=404, detail="No image file found in directory")
 
-    file_path = image_dir / image_file
+    file_path = (image_dir / image_file).resolve()
+    if not str(file_path).startswith(str(image_dir.resolve()) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid image file path")
     media_types = {
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",

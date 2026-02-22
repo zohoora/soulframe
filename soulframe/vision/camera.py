@@ -8,6 +8,7 @@ frames into a single-element deque, ensuring read() never blocks.
 import logging
 import threading
 from collections import deque
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -32,11 +33,12 @@ class CameraCapture:
         self._height = height
         self._fps = fps
 
-        self._cap: cv2.VideoCapture | None = None
+        self._cap: Optional[cv2.VideoCapture] = None
         self._frame_buffer: deque = deque(maxlen=1)
-        self._running = False
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._frame_seq: int = 0           # incremented by capture thread
+        self._last_read_seq: int = -1      # last sequence the consumer saw
 
         self._open()
 
@@ -71,27 +73,33 @@ class CameraCapture:
             actual_fps,
         )
 
-        self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
     def _capture_loop(self) -> None:
         """Continuously grab frames and push the latest into the buffer."""
-        while self._running:
+        while not self._stop_event.is_set():
             if self._cap is None:
                 break
-            ret, frame = self._cap.read()
-            if ret:
-                self._frame_buffer.append(frame)
-            else:
-                logger.debug("Camera read returned False.")
+            try:
+                ret, frame = self._cap.read()
+                if ret:
+                    self._frame_buffer.append((self._frame_seq, frame))
+                    self._frame_seq = (self._frame_seq + 1) & 0xFFFFFFFF
+                else:
+                    logger.debug("Camera read returned False.")
+                    self._stop_event.wait(0.03)  # avoid CPU spin on failure
+            except Exception:
+                logger.exception("Error in camera capture loop")
+                self._stop_event.wait(0.1)  # back off on repeated errors
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def read(self) -> tuple[bool, np.ndarray | None]:
-        """Return the most recent frame.
+    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+        """Return the most recent frame without removing it from the buffer.
 
         Returns:
             (success, frame) — *success* is False when no frame is
@@ -101,14 +109,17 @@ class CameraCapture:
             return False, None
 
         try:
-            frame = self._frame_buffer.pop()
+            seq, frame = self._frame_buffer[-1]
+            if seq == self._last_read_seq:
+                return False, None  # same frame already processed
+            self._last_read_seq = seq
             return True, frame
         except IndexError:
             return False, None
 
     def release(self) -> None:
         """Stop the capture thread and release the camera."""
-        self._running = False
+        self._stop_event.set()
 
         if self._thread is not None:
             self._thread.join(timeout=2.0)

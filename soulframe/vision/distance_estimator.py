@@ -7,14 +7,13 @@ Two complementary strategies:
 """
 
 import logging
-from typing import Any
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # Anthropometric constants
-AVERAGE_IRIS_DIAMETER_MM = 11.7
 AVERAGE_FACE_HEIGHT_MM = 140.0  # ~14 cm
 
 
@@ -27,9 +26,10 @@ class DistanceEstimator:
 
     @staticmethod
     def estimate_from_iris(
-        landmarks: dict[str, tuple[float, float]],
+        landmarks: Dict[str, Tuple[float, float]],
         frame_width: int,
-    ) -> float | None:
+        frame_height: int,
+    ) -> Optional[float]:
         """Triangulate distance using iris diameter.
 
         Requires *left_iris* and *right_iris* landmarks (normalised 0-1),
@@ -39,8 +39,8 @@ class DistanceEstimator:
         required landmarks are unavailable.
         """
         # Try dedicated iris landmarks first; fall back to eye centres.
-        left_key: str | None = None
-        right_key: str | None = None
+        left_key: Optional[str] = None
+        right_key: Optional[str] = None
 
         if "left_iris" in landmarks and "right_iris" in landmarks:
             left_key, right_key = "left_iris", "right_iris"
@@ -55,7 +55,7 @@ class DistanceEstimator:
         # Inter-iris (or inter-eye) distance in pixels.
         pixel_dist = np.sqrt(
             ((lx - rx) * frame_width) ** 2
-            + ((ly - ry) * frame_width) ** 2  # approx aspect ratio 1
+            + ((ly - ry) * frame_height) ** 2
         )
 
         if pixel_dist < 1.0:
@@ -70,7 +70,7 @@ class DistanceEstimator:
 
     @staticmethod
     def estimate_from_bbox(
-        bbox: tuple[int, int, int, int],
+        bbox: Tuple[int, int, int, int],
         frame_width: int,
         frame_height: int,
     ) -> float:
@@ -95,8 +95,8 @@ class DistanceEstimator:
 
     def estimate(
         self,
-        landmarks: dict[str, tuple[float, float]],
-        bbox: tuple[int, int, int, int],
+        landmarks: Dict[str, Tuple[float, float]],
+        bbox: Tuple[int, int, int, int],
         frame_width: int,
         frame_height: int,
     ) -> float:
@@ -104,7 +104,7 @@ class DistanceEstimator:
 
         Tries iris-based triangulation first; falls back to bounding-box.
         """
-        iris_dist = self.estimate_from_iris(landmarks, frame_width)
+        iris_dist = self.estimate_from_iris(landmarks, frame_width, frame_height)
         if iris_dist is not None:
             logger.debug("Distance (iris): %.1f cm", iris_dist)
             return iris_dist

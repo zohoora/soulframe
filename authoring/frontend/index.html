@@ -565,6 +565,7 @@ let metadata = null;          // ImageMetadataModel for the loaded image
 let selectedRegionIndex = -1;
 let drawingMode = false;
 let drawingPoints = [];       // [ {x, y}, ... ] stage-local coords
+let nextRegionCounter = 1;    // Monotonic counter for unique region IDs
 
 /* Konva objects */
 let stage = null;
@@ -675,6 +676,18 @@ async function selectImage(id) {
     return;
   }
 
+  // Sync the region counter so new IDs don't collide with existing ones.
+  nextRegionCounter = 1;
+  if (metadata.regions) {
+    metadata.regions.forEach(r => {
+      const match = (r.id || '').match(/^region_(\d+)$/);
+      if (match) {
+        const n = parseInt(match[1], 10);
+        if (n >= nextRegionCounter) nextRegionCounter = n + 1;
+      }
+    });
+  }
+
   updateButtons();
   loadImageOnCanvas();
   renderRegionList();
@@ -783,8 +796,8 @@ function stageToNormalized(sx, sy) {
   if (!imgObj) return [0, 0];
   const iw = imgObj.naturalWidth || imgObj.width;
   const ih = imgObj.naturalHeight || imgObj.height;
-  const nx = (sx - imageOffsetX) / (iw * imageScale);
-  const ny = (sy - imageOffsetY) / (ih * imageScale);
+  const nx = Math.max(0, Math.min(1, (sx - imageOffsetX) / (iw * imageScale)));
+  const ny = Math.max(0, Math.min(1, (sy - imageOffsetY) / (ih * imageScale)));
   return [nx, ny];
 }
 
@@ -876,7 +889,16 @@ function exitDrawingMode() {
   if (stage) stage.container().style.cursor = 'default';
 }
 
+// Track whether the last click was part of a double-click so we don't
+// add a spurious extra vertex when the user double-clicks to close.
+let _ignoreNextClick = false;
+
 function onStageClick(e) {
+  if (_ignoreNextClick) {
+    _ignoreNextClick = false;
+    return;
+  }
+
   if (!drawingMode) {
     // Deselect if clicking empty area
     if (e.target === stage || e.target === konvaImage) {
@@ -895,6 +917,14 @@ function onStageClick(e) {
 
 function onStageDblClick(e) {
   if (!drawingMode) return;
+  // The browser fires two clicks before the dblclick, so we already
+  // added one extra point via onStageClick.  Remove it.
+  if (drawingPoints.length > 0) {
+    drawingPoints.pop();
+  }
+  // Suppress the synthetic click that some browsers fire after dblclick.
+  _ignoreNextClick = true;
+
   if (drawingPoints.length < 3) {
     toast('Need at least 3 points to form a polygon', 'error');
     return;
@@ -938,7 +968,8 @@ function renderDrawingPreview() {
 function finalizeRegion() {
   const normalizedPts = drawingPoints.map(p => stageToNormalized(p.x, p.y));
 
-  const idx = metadata.regions.length + 1;
+  // Use a monotonic counter to avoid ID collisions after deletions.
+  const idx = nextRegionCounter++;
   const region = {
     id: `region_${idx}`,
     label: `Region ${idx}`,
@@ -1055,7 +1086,7 @@ function syncPropsToMetadata() {
 
   const label = document.getElementById('prop-label').value.trim();
   region.label = label;
-  region.id = slugify(label) || region.id;
+  // ID is immutable after creation — don't re-derive from label.
   document.getElementById('prop-id').value = region.id;
 
   region.gaze_trigger = region.gaze_trigger || {};

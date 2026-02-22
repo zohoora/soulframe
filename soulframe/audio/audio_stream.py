@@ -7,10 +7,11 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Union
 
 import numpy as np
 import soundfile as sf
-from scipy.signal import sosfilt, iirpeak
+from scipy.signal import sosfilt
 
 from soulframe import config
 
@@ -23,31 +24,25 @@ def _design_bass_boost_filter(
     gain_db: float,
     sample_rate: int,
 ) -> np.ndarray:
-    """Design a second-order peak (bell) filter and return it as SOS.
+    """Design a parametric peak (bell) EQ filter using Audio EQ Cookbook biquads.
 
-    Uses ``scipy.signal.iirpeak`` to build a narrow peak centred on
-    *center_hz*.  The resulting filter is scaled so that it adds
-    *gain_db* of boost at the centre frequency.
+    Returns second-order sections (SOS) array for use with sosfilt.
     """
-    # iirpeak returns (b, a) for a notch-style peak; we convert to SOS.
-    w0 = center_hz / (sample_rate / 2.0)  # normalised frequency 0..1
-    # Clamp to valid range for the filter design.
-    w0 = float(np.clip(w0, 1e-6, 1.0 - 1e-6))
-    b, a = iirpeak(w0, q)
+    A = 10.0 ** (gain_db / 40.0)  # amplitude
+    w0 = 2.0 * np.pi * center_hz / sample_rate
+    sin_w0 = np.sin(w0)
+    cos_w0 = np.cos(w0)
+    alpha = sin_w0 / (2.0 * q)
 
-    # iirpeak produces a unit-gain resonance.  Scale numerator to reach
-    # the desired boost.  linear gain = 10^(dB/20).
-    linear_gain = 10.0 ** (gain_db / 20.0)
-    # The peak filter has unity gain at DC; we want *additional* boost at
-    # the centre.  A simple approach: blend the dry (pass-through) signal
-    # with the peak-filtered signal so that the centre frequency gets the
-    # full gain_db boost.
-    #   out = dry + (gain - 1) * peaked
-    # This is baked into b so we can apply once with sosfilt.
-    b_boosted = np.array([1.0, 0.0, 0.0]) + (linear_gain - 1.0) * b
-    # Pack into a single SOS section: [b0, b1, b2, a0, a1, a2]
-    sos = np.array([[b_boosted[0], b_boosted[1], b_boosted[2],
-                     a[0], a[1], a[2]]], dtype=np.float64)
+    b0 = 1.0 + alpha * A
+    b1 = -2.0 * cos_w0
+    b2 = 1.0 - alpha * A
+    a0 = 1.0 + alpha / A
+    a1 = -2.0 * cos_w0
+    a2 = 1.0 - alpha / A
+
+    # Normalize by a0 and pack into SOS format: [b0, b1, b2, 1, a1/a0, a2/a0]
+    sos = np.array([[b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0]], dtype=np.float64)
     return sos
 
 
@@ -57,7 +52,7 @@ class AudioStream:
 
     def __init__(
         self,
-        file_path: str | Path,
+        file_path: Union[str, Path],
         loop: bool = True,
         bass_boost: bool = False,
     ) -> None:
@@ -70,7 +65,8 @@ class AudioStream:
         # Resample warning (actual resampling is out of scope; we just log).
         if sr != config.AUDIO_SAMPLE_RATE:
             logger.warning(
-                "Sample-rate mismatch: file %s is %d Hz, expected %d Hz",
+                "Sample-rate mismatch: file %s is %d Hz, output is %d Hz — "
+                "playback will be pitch-shifted",
                 self._file_path.name, sr, config.AUDIO_SAMPLE_RATE,
             )
 
@@ -87,7 +83,7 @@ class AudioStream:
                     center_hz=config.HEARTBEAT_BASS_CENTER_HZ,
                     q=config.HEARTBEAT_BASS_Q,
                     gain_db=config.HEARTBEAT_BASS_GAIN_DB,
-                    sample_rate=config.AUDIO_SAMPLE_RATE,
+                    sample_rate=sr,  # Use actual file sample rate, not config
                 )
                 for ch in range(data.shape[1]):
                     data[:, ch] = sosfilt(sos, data[:, ch]).astype(np.float32)
@@ -100,6 +96,10 @@ class AudioStream:
 
         # -- Playback state ----------------------------------------------------
         self._position: int = 0
+        self._finished: bool = self._num_frames == 0
+
+        if self._num_frames == 0:
+            logger.warning("Audio file has zero frames: %s", self._file_path.name)
 
         # -- Volume / fade state -----------------------------------------------
         self._volume: float = 0.0
@@ -117,6 +117,12 @@ class AudioStream:
         Returns a float32 array of shape ``(num_frames, 2)``.
         """
         out = np.zeros((num_frames, 2), dtype=np.float32)
+
+        # Guard: zero-frame files can never produce samples
+        if self._num_frames == 0:
+            self._finished = True
+            return out
+
         remaining = num_frames
         write_pos = 0
 
@@ -127,6 +133,7 @@ class AudioStream:
                     self._position = 0
                     available = self._num_frames
                 else:
+                    self._finished = True
                     break  # not looping — leave the rest as zeros
 
             chunk = min(remaining, available)
@@ -159,6 +166,12 @@ class AudioStream:
         if duration_ms <= 0:
             self.set_volume(target_volume)
             return
+        # Already at target — no fade needed.
+        if abs(self._volume - target_volume) < 1e-6:
+            self._volume = target_volume
+            self._fade_target = target_volume
+            self._fading = False
+            return
         self._fade_target = target_volume
         duration_s = duration_ms / 1000.0
         self._fade_rate = (self._fade_target - self._volume) / duration_s
@@ -184,6 +197,11 @@ class AudioStream:
         """The current effective volume, including fade state."""
         return self._volume
 
+    @property
+    def is_fading(self) -> bool:
+        """``True`` if a fade animation is currently in progress."""
+        return self._fading
+
     # ------------------------------------------------------------------
     # Utility
     # ------------------------------------------------------------------
@@ -191,10 +209,13 @@ class AudioStream:
     def reset(self) -> None:
         """Restart playback from the beginning of the audio data."""
         self._position = 0
+        self._finished = self._num_frames == 0
 
     @property
     def is_active(self) -> bool:
         """``True`` if the stream is audible or in the process of fading in."""
+        if self._finished:
+            return False
         if self._volume > 0.0:
             return True
         if self._fading and self._fade_target > 0.0:

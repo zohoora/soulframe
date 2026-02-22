@@ -1,6 +1,8 @@
 """EffectManager — manages all visual effect states for the display engine."""
 
 import logging
+import math
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -20,15 +22,39 @@ def _lerp_vec2(a: tuple, b: tuple, t: float) -> tuple:
 class _EffectState:
     """Internal state for a single effect with smooth parameter transitions."""
 
+    _DEFAULT_TRANSITION_SPEED = 2.0  # units per second for lerping
+
     def __init__(self, defaults: dict):
         self.current = dict(defaults)
         self.target = dict(defaults)
-        self.transition_speed = 2.0  # units per second for lerping
+        self.transition_speed = self._DEFAULT_TRANSITION_SPEED
 
     def set_params(self, params: dict):
-        """Set target parameters. They will be lerped toward over time."""
+        """Set target parameters. They will be lerped toward over time.
+
+        If ``fade_in_ms`` is present it overrides the transition speed so
+        that a full 0→1 transition takes approximately that many ms.
+        """
+        fade_in_ms = params.get("fade_in_ms")
+        if fade_in_ms is not None:
+            try:
+                fade_s = float(fade_in_ms) / 1000.0
+                if fade_s > 0:
+                    # transition_speed is used as the exponent in
+                    # 1 - e^(-speed * dt).  A speed of ~3/fade_s reaches
+                    # ~95% within the requested duration.
+                    self.transition_speed = 3.0 / fade_s
+                else:
+                    self.transition_speed = self._DEFAULT_TRANSITION_SPEED
+            except (TypeError, ValueError):
+                pass
+
         for key, value in params.items():
+            if key == "fade_in_ms":
+                continue  # consumed above, not a shader parameter
             if key in self.target:
+                if key == "intensity":
+                    value = max(0.0, min(1.0, float(value)))
                 self.target[key] = value
             else:
                 logger.warning("Unknown effect parameter: %s", key)
@@ -39,14 +65,19 @@ class _EffectState:
 
     def update(self, dt: float):
         """Advance all parameters toward their targets."""
-        t = min(1.0, self.transition_speed * dt)
+        # Exponential smoothing: factor = 1 - e^(-speed * dt)
+        # This is framerate-independent — same visual result at any fps.
+        factor = 1.0 - math.exp(-self.transition_speed * dt)
+        factor = max(0.0, min(1.0, factor))
         for key in self.current:
             cur = self.current[key]
             tgt = self.target[key]
-            if isinstance(cur, tuple):
-                self.current[key] = _lerp_vec2(cur, tgt, t)
+            if isinstance(cur, tuple) and isinstance(tgt, tuple):
+                self.current[key] = _lerp_vec2(cur, tgt, factor)
+            elif isinstance(cur, (int, float)) and isinstance(tgt, (int, float)):
+                self.current[key] = _lerp(float(cur), float(tgt), factor)
             else:
-                self.current[key] = _lerp(cur, tgt, t)
+                self.current[key] = tgt
 
 
 # Default parameters for each effect type
@@ -79,7 +110,7 @@ class EffectManager:
     """Manages all visual effect states and produces shader uniform values."""
 
     def __init__(self):
-        self._effects: dict[str, _EffectState] = {}
+        self._effects: Dict[str, _EffectState] = {}
         for name, defaults in _EFFECT_DEFAULTS.items():
             self._effects[name] = _EffectState(defaults)
         logger.info("EffectManager initialized with effects: %s", list(self._effects.keys()))

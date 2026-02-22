@@ -7,10 +7,11 @@ on a multiprocessing queue.
 from __future__ import annotations
 
 import logging
+import queue
 import time
 from multiprocessing import Queue
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 import numpy as np
 import sounddevice as sd
@@ -64,8 +65,7 @@ def run_audio_process(cmd_queue: Queue) -> None:
 
     mixer = AudioMixer()
 
-    # Cache of loaded AudioStream objects keyed by (file_path, bass_boost).
-    _stream_cache: Dict[tuple, AudioStream] = {}
+    # AudioStream objects are created fresh each time
 
     # ------------------------------------------------------------------
     # Resolve the output device
@@ -90,8 +90,12 @@ def run_audio_process(cmd_queue: Queue) -> None:
     ) -> None:
         if status:
             logger.warning("sounddevice status: %s", status)
-        mixed = mixer.mix(frames)
-        outdata[:] = mixed
+        try:
+            mixed = mixer.mix(frames, sample_rate=config.AUDIO_SAMPLE_RATE)
+            outdata[:] = mixed
+        except Exception:
+            outdata[:] = 0.0
+            logger.debug("Audio mix error, outputting silence", exc_info=True)
 
     # ------------------------------------------------------------------
     # Open the output stream
@@ -112,21 +116,14 @@ def run_audio_process(cmd_queue: Queue) -> None:
         return
 
     # ------------------------------------------------------------------
-    # Helper: get or create a cached AudioStream
+    # Helper: create a fresh AudioStream
     # ------------------------------------------------------------------
-    def _get_or_create_stream(
+    def _create_stream(
         file_path: str,
         loop: bool = True,
         bass_boost: bool = False,
     ) -> AudioStream:
-        key = (file_path, bass_boost)
-        cached = _stream_cache.get(key)
-        if cached is not None:
-            cached.reset()
-            return cached
-        new_stream = AudioStream(file_path, loop=loop, bass_boost=bass_boost)
-        _stream_cache[key] = new_stream
-        return new_stream
+        return AudioStream(file_path, loop=loop, bass_boost=bass_boost)
 
     # ------------------------------------------------------------------
     # Command handling
@@ -145,20 +142,17 @@ def run_audio_process(cmd_queue: Queue) -> None:
                     logger.error("PLAY_AMBIENT missing 'file_path' param")
                     return True
                 fade_ms = float(params.get("fade_ms", _FADE_IN_MS))
-                audio = _get_or_create_stream(file_path, loop=True, bass_boost=False)
+                loop = params.get("loop", True)
+                audio = _create_stream(file_path, loop=loop, bass_boost=False)
                 audio.set_volume(0.0)
                 mixer.add_stream("ambient", audio)
-                audio.set_fade(1.0, fade_ms)
+                mixer.set_stream_fade("ambient", 1.0, fade_ms)
                 logger.info("Playing ambient: %s", file_path)
 
             # -- STOP_AMBIENT --------------------------------------------------
             elif ct == CommandType.STOP_AMBIENT:
                 fade_ms = float(params.get("fade_ms", _FADE_OUT_MS))
-                ambient = mixer.get_stream("ambient")
-                if ambient is not None:
-                    ambient.set_fade(0.0, fade_ms)
-                    # The stream will be removed after the fade completes
-                    # during the cleanup sweep (see below).
+                if mixer.set_stream_fade("ambient", 0.0, fade_ms):
                     logger.info("Fading out ambient")
 
             # -- PLAY_HEARTBEAT ------------------------------------------------
@@ -170,10 +164,12 @@ def run_audio_process(cmd_queue: Queue) -> None:
                     return True
                 fade_ms = float(params.get("fade_ms", _FADE_IN_MS))
                 stream_name = f"heartbeat_{region_id}"
-                audio = _get_or_create_stream(file_path, loop=True, bass_boost=True)
+                loop = params.get("loop", True)
+                bass_boost = params.get("bass_boost", True)
+                audio = _create_stream(file_path, loop=loop, bass_boost=bass_boost)
                 audio.set_volume(0.0)
                 mixer.add_stream(stream_name, audio)
-                audio.set_fade(1.0, fade_ms)
+                mixer.set_stream_fade(stream_name, 1.0, fade_ms)
                 logger.info("Playing heartbeat '%s': %s", stream_name, file_path)
 
             # -- STOP_HEARTBEAT ------------------------------------------------
@@ -181,18 +177,14 @@ def run_audio_process(cmd_queue: Queue) -> None:
                 region_id = params.get("region_id", "default")
                 fade_ms = float(params.get("fade_ms", _FADE_OUT_MS))
                 stream_name = f"heartbeat_{region_id}"
-                hb = mixer.get_stream(stream_name)
-                if hb is not None:
-                    hb.set_fade(0.0, fade_ms)
+                if mixer.set_stream_fade(stream_name, 0.0, fade_ms):
                     logger.info("Fading out heartbeat '%s'", stream_name)
 
             # -- SET_VOLUME ----------------------------------------------------
             elif ct == CommandType.SET_VOLUME:
                 name = params.get("name", "")
                 volume = float(params.get("volume", 1.0))
-                s = mixer.get_stream(name)
-                if s is not None:
-                    s.set_volume(volume)
+                if mixer.set_stream_volume(name, volume):
                     logger.debug("Set volume of '%s' to %.2f", name, volume)
                 else:
                     logger.warning("SET_VOLUME: stream '%s' not found", name)
@@ -207,14 +199,12 @@ def run_audio_process(cmd_queue: Queue) -> None:
             # -- STOP_ALL ------------------------------------------------------
             elif ct == CommandType.STOP_ALL:
                 mixer.stop_all()
-                _stream_cache.clear()
                 logger.info("All streams stopped")
 
             # -- SHUTDOWN ------------------------------------------------------
             elif ct == CommandType.SHUTDOWN:
                 logger.info("Shutdown command received")
                 mixer.stop_all()
-                _stream_cache.clear()
                 return False
 
             else:
@@ -237,27 +227,18 @@ def run_audio_process(cmd_queue: Queue) -> None:
             try:
                 cmd = cmd_queue.get(timeout=_QUEUE_TIMEOUT)
                 running = _handle_command(cmd)
-            except Exception:
-                # queue.Empty is expected on timeout; any other error we log.
+            except queue.Empty:
                 pass
+            except Exception:
+                logger.exception("Error processing command")
 
-            # --- Advance fades -----------------------------------------------
+            # --- Tick timing (fades advance inside mixer.mix() on the
+            #     sounddevice callback thread) --------------------------------
             now = time.monotonic()
-            dt = now - last_time
             last_time = now
-            mixer.update(dt)
 
             # --- Clean up silent streams that finished fading out ------------
-            # We collect names first, then remove outside the mixer lock to
-            # avoid modifying the dict while iterating.
-            _to_remove = []
-            for name in list(mixer._streams.keys()):
-                s = mixer.get_stream(name)
-                if s is not None and not s.is_active and s.current_volume <= 0.0:
-                    _to_remove.append(name)
-            for name in _to_remove:
-                mixer.remove_stream(name)
-                logger.debug("Cleaned up silent stream '%s'", name)
+            mixer.remove_inactive()
 
     except KeyboardInterrupt:
         logger.info("Audio process interrupted")

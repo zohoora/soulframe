@@ -6,7 +6,7 @@ Fallback backend: OpenCV YuNet face detector (5 keypoints).
 """
 
 import logging
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -56,8 +56,18 @@ class FaceDetector:
         # YuNet ships with OpenCV contrib (4.5.4+).  We create the
         # detector lazily on the first call to detect() because we need
         # the frame dimensions to initialise it.
-        self._yunet_detector: cv2.FaceDetectorYN | None = None
-        self._yunet_input_size: tuple[int, int] | None = None
+        self._yunet_model_path = config.MODELS_DIR / "face_detection_yunet.onnx"
+        if not self._yunet_model_path.exists():
+            logger.warning(
+                "YuNet model not found at %s — YuNet backend disabled.",
+                self._yunet_model_path,
+            )
+            self._yunet_detector = None
+            self._yunet_input_size = None
+            self._backend = "none"
+            return
+        self._yunet_detector: Optional[cv2.FaceDetectorYN] = None
+        self._yunet_input_size: Optional[Tuple[int, int]] = None
         self._backend = "yunet"
         logger.info("FaceDetector using YuNet backend.")
 
@@ -67,7 +77,7 @@ class FaceDetector:
             or self._yunet_input_size != (width, height)
         ):
             self._yunet_detector = cv2.FaceDetectorYN.create(
-                "",  # empty model path — uses built-in weights
+                str(self._yunet_model_path),
                 "",
                 (width, height),
                 self._min_confidence,
@@ -81,7 +91,7 @@ class FaceDetector:
     # Public API
     # ------------------------------------------------------------------
 
-    def detect(self, frame: np.ndarray) -> list[dict[str, Any]]:
+    def detect(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         """Detect faces in *frame* (BGR uint8).
 
         Returns a list of dicts, each with:
@@ -99,12 +109,12 @@ class FaceDetector:
     # MediaPipe detection
     # ------------------------------------------------------------------
 
-    def _detect_mediapipe(self, frame: np.ndarray) -> list[dict[str, Any]]:
+    def _detect_mediapipe(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         h, w = frame.shape[:2]
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self._mp_detector.process(rgb)
 
-        faces: list[dict[str, Any]] = []
+        faces: List[Dict[str, Any]] = []
         if not results.detections:
             return faces
 
@@ -115,16 +125,16 @@ class FaceDetector:
 
             # Relative bounding box → pixel bbox
             rbb = det.location_data.relative_bounding_box
-            x = int(rbb.xmin * w)
-            y = int(rbb.ymin * h)
-            bw = int(rbb.width * w)
-            bh = int(rbb.height * h)
+            x = max(0, int(rbb.xmin * w))
+            y = max(0, int(rbb.ymin * h))
+            bw = min(int(rbb.width * w), w - x)
+            bh = min(int(rbb.height * h), h - y)
 
             # MediaPipe provides 6 keypoints (indices 0-5):
             #   0 right_eye, 1 left_eye, 2 nose_tip,
             #   3 mouth_center, 4 right_ear, 5 left_ear
             kp = det.location_data.relative_keypoints
-            landmarks: dict[str, tuple[float, float]] = {}
+            landmarks: Dict[str, Tuple[float, float]] = {}
             _mp_names = [
                 "right_eye",
                 "left_eye",
@@ -151,7 +161,7 @@ class FaceDetector:
     # YuNet detection
     # ------------------------------------------------------------------
 
-    def _detect_yunet(self, frame: np.ndarray) -> list[dict[str, Any]]:
+    def _detect_yunet(self, frame: np.ndarray) -> List[Dict[str, Any]]:
         h, w = frame.shape[:2]
         try:
             detector = self._ensure_yunet(w, h)
@@ -163,16 +173,21 @@ class FaceDetector:
         if raw is None:
             return []
 
-        faces: list[dict[str, Any]] = []
+        faces: List[Dict[str, Any]] = []
         for row in raw:
-            x, y, bw, bh = int(row[0]), int(row[1]), int(row[2]), int(row[3])
+            if len(row) < 15:
+                continue
+            x = max(0, int(row[0]))
+            y = max(0, int(row[1]))
+            bw = min(int(row[2]), w - x)
+            bh = min(int(row[3]), h - y)
             score = float(row[14])
             if score < self._min_confidence:
                 continue
 
             # YuNet keypoints (pixel coords): right_eye, left_eye,
             # nose_tip, right_mouth, left_mouth
-            landmarks: dict[str, tuple[float, float]] = {}
+            landmarks: Dict[str, Tuple[float, float]] = {}
             _yunet_names = [
                 "right_eye",
                 "left_eye",
@@ -185,6 +200,12 @@ class FaceDetector:
                 py = float(row[5 + idx * 2])
                 # Normalise to 0-1 range
                 landmarks[name] = (px / w, py / h)
+
+            # Synthesise mouth_center from the two mouth corners.
+            if "right_mouth" in landmarks and "left_mouth" in landmarks:
+                rm = landmarks["right_mouth"]
+                lm = landmarks["left_mouth"]
+                landmarks["mouth_center"] = ((rm[0] + lm[0]) / 2, (rm[1] + lm[1]) / 2)
 
             faces.append(
                 {

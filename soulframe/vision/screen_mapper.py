@@ -8,13 +8,13 @@ a simple linear mapping where (yaw=0, pitch=0) maps to screen centre.
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Tuple
 
 from soulframe import config
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_CALIBRATION: dict[str, Any] = {
+_DEFAULT_CALIBRATION: Dict[str, Any] = {
     # Scale factors: how many screen-units per radian of gaze angle.
     "gaze_yaw_scale": 1.5,
     "gaze_pitch_scale": 1.2,
@@ -30,7 +30,7 @@ class ScreenMapper:
     """Convert gaze + head-pose angles to normalised screen position."""
 
     def __init__(self) -> None:
-        self._calibration: dict[str, Any] = dict(_DEFAULT_CALIBRATION)
+        self._calibration: Dict[str, Any] = dict(_DEFAULT_CALIBRATION)
         self._calibration_path: Path = (
             Path(config.CALIBRATION_DIR) / "screen_calibration.json"
         )
@@ -46,6 +46,16 @@ class ScreenMapper:
             try:
                 with open(self._calibration_path, "r") as fh:
                     data = json.load(fh)
+                # Validate and coerce numeric calibration values
+                for key in list(data.keys()):
+                    if key in _DEFAULT_CALIBRATION:
+                        try:
+                            data[key] = float(data[key])
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "Invalid calibration value for '%s', using default", key,
+                            )
+                            del data[key]
                 self._calibration.update(data)
                 logger.info(
                     "Screen calibration loaded from %s", self._calibration_path
@@ -61,7 +71,7 @@ class ScreenMapper:
                 self._calibration_path,
             )
 
-    def save_calibration(self, data: dict[str, Any]) -> None:
+    def save_calibration(self, data: Dict[str, Any]) -> None:
         """Persist calibration data to disk.
 
         *data* is merged into the current calibration before saving.
@@ -82,7 +92,7 @@ class ScreenMapper:
         gaze_pitch: float,
         head_yaw: float = 0.0,
         head_pitch: float = 0.0,
-    ) -> tuple[float, float]:
+    ) -> Tuple[float, float]:
         """Map gaze and head-pose angles to screen coordinates.
 
         Parameters:
