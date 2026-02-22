@@ -1,0 +1,19 @@
+[Unit]
+Description=Soul Frame Authoring Tool
+After=network.target
+
+[Service]
+Type=simple
+User=arash
+Group=arash
+WorkingDirectory=/home/arash/soulframe
+Environment=SOULFRAME_ROOT=/home/arash/soulframe
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/arash/soulframe/.venv/bin/python -m soulframe --authoring
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

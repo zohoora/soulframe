@@ -1,0 +1,1304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Soul Frame Authoring Tool</title>
+<script src="https://unpkg.com/konva@9/konva.min.js"></script>
+<style>
+  /* ── Reset & Base ─────────────────────────────────────────────────────── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg-dark:    #0f1117;
+    --bg-panel:   #1a1d27;
+    --bg-input:   #252836;
+    --bg-hover:   #2a2e3d;
+    --bg-active:  #333850;
+    --border:     #3a3f52;
+    --text:       #e0e0e8;
+    --text-dim:   #8888a0;
+    --accent:     #7c6fef;
+    --accent-dim: #5a50b8;
+    --danger:     #d94f4f;
+    --success:    #4fbf6d;
+    --radius:     6px;
+    --font:       'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+
+  body {
+    font-family: var(--font);
+    background: var(--bg-dark);
+    color: var(--text);
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Top Bar ──────────────────────────────────────────────────────────── */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    height: 48px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .topbar h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  .topbar-actions { display: flex; gap: 8px; }
+
+  /* ── Layout ───────────────────────────────────────────────────────────── */
+  .layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ──────────────────────────────────────────────────────────── */
+  .sidebar {
+    width: 240px;
+    min-width: 240px;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .sidebar-header {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+  }
+  .sidebar-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+  }
+  .sidebar-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: background 0.15s;
+    margin-bottom: 2px;
+  }
+  .sidebar-item:hover { background: var(--bg-hover); }
+  .sidebar-item.active { background: var(--bg-active); }
+  .sidebar-thumb {
+    width: 40px;
+    height: 40px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--bg-input);
+    flex-shrink: 0;
+  }
+  .sidebar-info { overflow: hidden; }
+  .sidebar-title {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sidebar-meta {
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+  .sidebar-item .delete-btn {
+    margin-left: auto;
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+  .sidebar-item:hover .delete-btn { opacity: 1; }
+  .sidebar-item .delete-btn:hover { color: var(--danger); background: rgba(217,79,79,0.15); }
+
+  /* ── Canvas Area ──────────────────────────────────────────────────────── */
+  .canvas-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    background: #0a0b0f;
+  }
+  .canvas-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-panel);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .canvas-container {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+  }
+  #konva-container {
+    width: 100%;
+    height: 100%;
+  }
+  .canvas-hint {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: var(--text-dim);
+    font-size: 15px;
+    pointer-events: none;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  /* ── Properties Panel ─────────────────────────────────────────────────── */
+  .properties {
+    width: 300px;
+    min-width: 300px;
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .properties-header {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+  }
+  .properties-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+  }
+  .properties-empty {
+    color: var(--text-dim);
+    font-size: 13px;
+    padding: 20px 12px;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .prop-section {
+    margin-bottom: 16px;
+  }
+  .prop-section-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+  }
+  .prop-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+  .prop-row label {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+  .prop-row input[type="text"],
+  .prop-row input[type="number"],
+  .prop-row select {
+    width: 100%;
+    padding: 6px 8px;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 13px;
+    font-family: var(--font);
+    outline: none;
+  }
+  .prop-row input:focus, .prop-row select:focus {
+    border-color: var(--accent);
+  }
+  .prop-row input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+  }
+  .prop-row .range-value {
+    font-size: 11px;
+    color: var(--accent);
+    text-align: right;
+  }
+
+  /* ── Buttons ──────────────────────────────────────────────────────────── */
+  .btn {
+    padding: 6px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-input);
+    color: var(--text);
+    font-size: 12px;
+    font-family: var(--font);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--bg-hover); border-color: var(--accent-dim); }
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .btn-primary:hover { background: var(--accent-dim); }
+  .btn-danger {
+    border-color: var(--danger);
+    color: var(--danger);
+  }
+  .btn-danger:hover { background: rgba(217,79,79,0.15); }
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+  .btn-active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
+  /* ── Modal / Dialog ───────────────────────────────────────────────────── */
+  .modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+  .modal-overlay.hidden { display: none; }
+  .modal {
+    background: var(--bg-panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    min-width: 380px;
+    max-width: 480px;
+  }
+  .modal h2 {
+    font-size: 16px;
+    margin-bottom: 16px;
+  }
+  .modal .prop-row { margin-bottom: 12px; }
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+  }
+
+  /* ── Status Bar ───────────────────────────────────────────────────────── */
+  .statusbar {
+    height: 28px;
+    background: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    font-size: 11px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    gap: 16px;
+  }
+
+  /* ── Scrollbar ────────────────────────────────────────────────────────── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #555; }
+
+  /* ── Region list in properties ────────────────────────────────────────── */
+  .region-list-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 8px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 13px;
+    margin-bottom: 2px;
+    transition: background 0.15s;
+  }
+  .region-list-item:hover { background: var(--bg-hover); }
+  .region-list-item.active { background: var(--bg-active); }
+  .region-list-item .remove-region {
+    background: none;
+    border: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-size: 13px;
+    padding: 0 4px;
+    border-radius: 3px;
+  }
+  .region-list-item .remove-region:hover {
+    color: var(--danger);
+    background: rgba(217,79,79,0.15);
+  }
+
+  /* ── Toast ────────────────────────────────────────────────────────────── */
+  .toast-container {
+    position: fixed;
+    bottom: 40px;
+    right: 16px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .toast {
+    padding: 8px 16px;
+    border-radius: var(--radius);
+    font-size: 13px;
+    color: #fff;
+    animation: toastIn 0.3s ease;
+  }
+  .toast-success { background: var(--success); }
+  .toast-error   { background: var(--danger); }
+  .toast-info    { background: var(--accent); }
+  @keyframes toastIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<!-- Top Bar -->
+<div class="topbar">
+  <h1>Soul Frame Authoring</h1>
+  <div class="topbar-actions">
+    <button class="btn btn-primary" id="btn-save" disabled>Save Metadata</button>
+  </div>
+</div>
+
+<!-- Main Layout -->
+<div class="layout">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-header">
+      Gallery Images
+      <button class="btn btn-sm" style="float:right;margin-top:-2px" id="btn-upload-image">+ Upload</button>
+    </div>
+    <div class="sidebar-list" id="sidebar-list">
+      <!-- filled by JS -->
+    </div>
+  </div>
+
+  <!-- Canvas Area -->
+  <div class="canvas-area">
+    <div class="canvas-toolbar">
+      <button class="btn btn-sm" id="btn-draw" disabled>Draw Region</button>
+      <button class="btn btn-sm" id="btn-cancel-draw" style="display:none">Cancel</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-sm" id="btn-upload-audio" disabled>Upload Audio</button>
+      <button class="btn btn-sm" id="btn-zoom-fit" disabled>Fit View</button>
+    </div>
+    <div class="canvas-container">
+      <div id="konva-container"></div>
+      <div class="canvas-hint" id="canvas-hint">Select an image from the sidebar to begin</div>
+    </div>
+  </div>
+
+  <!-- Properties Panel -->
+  <div class="properties">
+    <div class="properties-header">Properties</div>
+    <div class="properties-body" id="properties-body">
+      <div class="properties-empty" id="props-empty">
+        Select a region or draw a new one to edit its properties.
+      </div>
+      <div id="props-region-list" style="display:none">
+        <div class="prop-section">
+          <div class="prop-section-title">Regions</div>
+          <div id="region-list"></div>
+          <div style="margin-top:6px; font-size:11px; color:var(--text-dim)">
+            Click a region in the list or on the canvas to edit.
+          </div>
+        </div>
+      </div>
+      <div id="props-editor" style="display:none">
+        <div class="prop-section">
+          <div class="prop-section-title">Region</div>
+          <div class="prop-row">
+            <label>Label</label>
+            <input type="text" id="prop-label" placeholder="e.g. Left Eye">
+          </div>
+          <div class="prop-row">
+            <label>ID</label>
+            <input type="text" id="prop-id" readonly style="opacity:0.6">
+          </div>
+        </div>
+        <div class="prop-section">
+          <div class="prop-section-title">Gaze Trigger</div>
+          <div class="prop-row">
+            <label>Dwell Time (ms)</label>
+            <input type="number" id="prop-dwell" min="100" max="10000" step="100" value="1500">
+          </div>
+          <div class="prop-row">
+            <label>Min Confidence</label>
+            <input type="range" id="prop-confidence" min="0" max="1" step="0.05" value="0.6">
+            <div class="range-value" id="prop-confidence-val">0.60</div>
+          </div>
+        </div>
+        <div class="prop-section">
+          <div class="prop-section-title">Heartbeat Audio</div>
+          <div class="prop-row">
+            <label>Audio File</label>
+            <input type="text" id="prop-heartbeat-file" readonly placeholder="(none)" style="opacity:0.7">
+          </div>
+          <div class="prop-row">
+            <button class="btn btn-sm" id="btn-pick-heartbeat">Choose Audio File</button>
+            <input type="file" id="input-heartbeat-file" accept=".wav,.mp3,.ogg,.flac,.aac" style="display:none">
+          </div>
+          <div class="prop-row">
+            <label>Fade In (ms)</label>
+            <input type="number" id="prop-heartbeat-fade" min="0" max="10000" step="100" value="2000">
+          </div>
+        </div>
+        <div class="prop-section">
+          <div class="prop-section-title">Visual Effects</div>
+          <div class="prop-row">
+            <label>Effect Type</label>
+            <select id="prop-effect-type">
+              <option value="breathing">Breathing</option>
+              <option value="parallax">Parallax</option>
+            </select>
+          </div>
+          <div class="prop-row">
+            <label>Amplitude</label>
+            <input type="number" id="prop-effect-amplitude" min="0" max="2" step="0.05" value="0.15">
+          </div>
+          <div class="prop-row">
+            <label>Frequency (Hz)</label>
+            <input type="number" id="prop-effect-frequency" min="0.01" max="5" step="0.01" value="0.25">
+          </div>
+          <div class="prop-row">
+            <label>Fade In (ms)</label>
+            <input type="number" id="prop-effect-fade" min="0" max="10000" step="100" value="3000">
+          </div>
+        </div>
+        <div style="margin-top:8px">
+          <button class="btn btn-danger btn-sm" id="btn-delete-region">Delete Region</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Status Bar -->
+<div class="statusbar">
+  <span id="status-image">No image loaded</span>
+  <span id="status-regions">0 regions</span>
+  <span id="status-mode">Mode: Select</span>
+</div>
+
+<!-- Upload Image Modal -->
+<div class="modal-overlay hidden" id="modal-upload-image">
+  <div class="modal">
+    <h2>Upload New Image</h2>
+    <div class="prop-row">
+      <label>Title</label>
+      <input type="text" id="upload-title" placeholder="My Artwork">
+    </div>
+    <div class="prop-row">
+      <label>Image File</label>
+      <input type="file" id="upload-file" accept=".jpg,.jpeg,.png,.bmp,.tiff,.webp">
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="upload-cancel">Cancel</button>
+      <button class="btn btn-primary" id="upload-confirm">Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- Audio Upload Modal -->
+<div class="modal-overlay hidden" id="modal-upload-audio">
+  <div class="modal">
+    <h2>Upload Audio</h2>
+    <p style="font-size:13px;color:var(--text-dim);margin-bottom:12px">Upload an ambient audio file for this image.</p>
+    <div class="prop-row">
+      <label>Audio File</label>
+      <input type="file" id="audio-upload-file" accept=".wav,.mp3,.ogg,.flac,.aac">
+    </div>
+    <div class="modal-actions">
+      <button class="btn" id="audio-upload-cancel">Cancel</button>
+      <button class="btn btn-primary" id="audio-upload-confirm">Upload</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toast-container"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+/* ─── State ─────────────────────────────────────────────────────────────── */
+let images = [];
+let currentImageId = null;
+let metadata = null;          // ImageMetadataModel for the loaded image
+let selectedRegionIndex = -1;
+let drawingMode = false;
+let drawingPoints = [];       // [ {x, y}, ... ] stage-local coords
+
+/* Konva objects */
+let stage = null;
+let layer = null;
+let imageLayer = null;
+let regionLayer = null;
+let drawLayer = null;
+let konvaImage = null;
+let imgObj = null;
+let imageScale = 1;
+let imageOffsetX = 0;
+let imageOffsetY = 0;
+
+/* ─── Helpers ───────────────────────────────────────────────────────────── */
+const API = '/api';
+
+async function apiFetch(path, opts = {}) {
+  const res = await fetch(`${API}${path}`, opts);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`API ${res.status}: ${text}`);
+  }
+  return res.json();
+}
+
+function toast(msg, type = 'info') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toast-container').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+function slugify(s) {
+  return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+}
+
+/* ─── Image List ────────────────────────────────────────────────────────── */
+async function loadImageList() {
+  try {
+    images = await apiFetch('/images');
+  } catch (e) {
+    toast('Failed to load images: ' + e.message, 'error');
+    images = [];
+  }
+  renderSidebar();
+}
+
+function renderSidebar() {
+  const list = document.getElementById('sidebar-list');
+  list.innerHTML = '';
+  if (images.length === 0) {
+    list.innerHTML = '<div style="padding:16px;text-align:center;color:var(--text-dim);font-size:13px">No images yet. Click Upload to add one.</div>';
+    return;
+  }
+  images.forEach(img => {
+    const item = document.createElement('div');
+    item.className = 'sidebar-item' + (img.id === currentImageId ? ' active' : '');
+    item.innerHTML = `
+      <img class="sidebar-thumb" src="${img.thumbnail_url}" alt="" onerror="this.style.display='none'">
+      <div class="sidebar-info">
+        <div class="sidebar-title">${escHtml(img.title)}</div>
+        <div class="sidebar-meta">${img.has_metadata ? 'Has metadata' : 'No metadata'}</div>
+      </div>
+      <button class="delete-btn" title="Delete">&times;</button>
+    `;
+    item.querySelector('.delete-btn').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Delete "${img.title}"? This cannot be undone.`)) return;
+      try {
+        await apiFetch(`/images/${img.id}`, { method: 'DELETE' });
+        toast('Image deleted', 'success');
+        if (currentImageId === img.id) {
+          currentImageId = null;
+          metadata = null;
+          clearCanvas();
+          showCanvasHint(true);
+          updateButtons();
+        }
+        loadImageList();
+      } catch (e) {
+        toast('Delete failed: ' + e.message, 'error');
+      }
+    });
+    item.addEventListener('click', () => selectImage(img.id));
+    list.appendChild(item);
+  });
+}
+
+function escHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+/* ─── Select & Load Image ───────────────────────────────────────────────── */
+async function selectImage(id) {
+  currentImageId = id;
+  selectedRegionIndex = -1;
+  exitDrawingMode();
+  renderSidebar();
+  showCanvasHint(false);
+
+  try {
+    metadata = await apiFetch(`/images/${id}`);
+  } catch (e) {
+    toast('Failed to load metadata: ' + e.message, 'error');
+    return;
+  }
+
+  updateButtons();
+  loadImageOnCanvas();
+  renderRegionList();
+  showPropsEmpty();
+  document.getElementById('status-image').textContent = `Image: ${metadata.title || id}`;
+  updateRegionCount();
+}
+
+function updateButtons() {
+  const hasImage = !!currentImageId;
+  document.getElementById('btn-save').disabled = !hasImage;
+  document.getElementById('btn-draw').disabled = !hasImage;
+  document.getElementById('btn-upload-audio').disabled = !hasImage;
+  document.getElementById('btn-zoom-fit').disabled = !hasImage;
+}
+
+function showCanvasHint(show) {
+  document.getElementById('canvas-hint').style.display = show ? 'block' : 'none';
+}
+
+/* ─── Konva Setup ───────────────────────────────────────────────────────── */
+function initKonva() {
+  const container = document.getElementById('konva-container');
+  const rect = container.getBoundingClientRect();
+
+  stage = new Konva.Stage({
+    container: 'konva-container',
+    width: rect.width,
+    height: rect.height,
+  });
+
+  imageLayer = new Konva.Layer();
+  regionLayer = new Konva.Layer();
+  drawLayer = new Konva.Layer();
+  stage.add(imageLayer);
+  stage.add(regionLayer);
+  stage.add(drawLayer);
+
+  // Clicks on stage
+  stage.on('click', onStageClick);
+  stage.on('dblclick', onStageDblClick);
+
+  // Resize
+  window.addEventListener('resize', () => {
+    const r = container.getBoundingClientRect();
+    stage.width(r.width);
+    stage.height(r.height);
+    if (currentImageId) fitImage();
+  });
+}
+
+function clearCanvas() {
+  imageLayer.destroyChildren();
+  regionLayer.destroyChildren();
+  drawLayer.destroyChildren();
+  imageLayer.draw();
+  regionLayer.draw();
+  drawLayer.draw();
+  konvaImage = null;
+}
+
+function loadImageOnCanvas() {
+  clearCanvas();
+
+  imgObj = new Image();
+  imgObj.crossOrigin = 'anonymous';
+  imgObj.onload = () => {
+    konvaImage = new Konva.Image({
+      image: imgObj,
+      x: 0,
+      y: 0,
+    });
+    imageLayer.add(konvaImage);
+    fitImage();
+    drawAllRegions();
+  };
+  imgObj.src = `/api/images/${currentImageId}/file`;
+}
+
+function fitImage() {
+  if (!konvaImage || !imgObj) return;
+  const sw = stage.width();
+  const sh = stage.height();
+  const iw = imgObj.naturalWidth || imgObj.width;
+  const ih = imgObj.naturalHeight || imgObj.height;
+  if (!iw || !ih) return;
+
+  const scaleX = sw / iw;
+  const scaleY = sh / ih;
+  imageScale = Math.min(scaleX, scaleY) * 0.92;
+  imageOffsetX = (sw - iw * imageScale) / 2;
+  imageOffsetY = (sh - ih * imageScale) / 2;
+
+  konvaImage.setAttrs({
+    x: imageOffsetX,
+    y: imageOffsetY,
+    scaleX: imageScale,
+    scaleY: imageScale,
+  });
+  imageLayer.draw();
+  drawAllRegions();
+}
+
+/* ─── Coordinate Conversion ─────────────────────────────────────────────── */
+function stageToNormalized(sx, sy) {
+  if (!imgObj) return [0, 0];
+  const iw = imgObj.naturalWidth || imgObj.width;
+  const ih = imgObj.naturalHeight || imgObj.height;
+  const nx = (sx - imageOffsetX) / (iw * imageScale);
+  const ny = (sy - imageOffsetY) / (ih * imageScale);
+  return [nx, ny];
+}
+
+function normalizedToStage(nx, ny) {
+  if (!imgObj) return { x: 0, y: 0 };
+  const iw = imgObj.naturalWidth || imgObj.width;
+  const ih = imgObj.naturalHeight || imgObj.height;
+  return {
+    x: nx * iw * imageScale + imageOffsetX,
+    y: ny * ih * imageScale + imageOffsetY,
+  };
+}
+
+/* ─── Draw Regions ──────────────────────────────────────────────────────── */
+const REGION_COLORS = [
+  '#7c6fef', '#ef6f7c', '#6fefb0', '#efcf6f', '#6fb8ef',
+  '#d06fef', '#ef9f6f', '#6fefd8', '#ef6fc8', '#b0ef6f',
+];
+
+function drawAllRegions() {
+  regionLayer.destroyChildren();
+  if (!metadata || !metadata.regions) { regionLayer.draw(); return; }
+
+  metadata.regions.forEach((region, idx) => {
+    const pts = region.shape.points_normalized;
+    if (!pts || pts.length < 3) return;
+
+    const flatPoints = [];
+    pts.forEach(p => {
+      const sp = normalizedToStage(p[0], p[1]);
+      flatPoints.push(sp.x, sp.y);
+    });
+
+    const color = REGION_COLORS[idx % REGION_COLORS.length];
+    const isSelected = idx === selectedRegionIndex;
+
+    const line = new Konva.Line({
+      points: flatPoints,
+      fill: color + (isSelected ? '40' : '20'),
+      stroke: color,
+      strokeWidth: isSelected ? 2.5 : 1.5,
+      closed: true,
+      hitStrokeWidth: 10,
+    });
+
+    line.on('click', (e) => {
+      e.cancelBubble = true;
+      if (drawingMode) return;
+      selectRegion(idx);
+    });
+
+    regionLayer.add(line);
+
+    // Label
+    const cx = flatPoints.reduce((s, v, i) => i % 2 === 0 ? s + v : s, 0) / pts.length;
+    const cy = flatPoints.reduce((s, v, i) => i % 2 === 1 ? s + v : s, 0) / pts.length;
+    const label = new Konva.Text({
+      x: cx - 30,
+      y: cy - 8,
+      text: region.label || region.id || `Region ${idx + 1}`,
+      fontSize: 12,
+      fill: '#fff',
+      listening: false,
+    });
+    regionLayer.add(label);
+  });
+
+  regionLayer.draw();
+}
+
+/* ─── Drawing Mode ──────────────────────────────────────────────────────── */
+function enterDrawingMode() {
+  drawingMode = true;
+  drawingPoints = [];
+  document.getElementById('btn-draw').classList.add('btn-active');
+  document.getElementById('btn-cancel-draw').style.display = '';
+  document.getElementById('status-mode').textContent = 'Mode: Draw (click to add points, double-click to close)';
+  stage.container().style.cursor = 'crosshair';
+}
+
+function exitDrawingMode() {
+  drawingMode = false;
+  drawingPoints = [];
+  drawLayer.destroyChildren();
+  drawLayer.draw();
+  document.getElementById('btn-draw').classList.remove('btn-active');
+  document.getElementById('btn-cancel-draw').style.display = 'none';
+  document.getElementById('status-mode').textContent = 'Mode: Select';
+  if (stage) stage.container().style.cursor = 'default';
+}
+
+function onStageClick(e) {
+  if (!drawingMode) {
+    // Deselect if clicking empty area
+    if (e.target === stage || e.target === konvaImage) {
+      selectedRegionIndex = -1;
+      drawAllRegions();
+      showPropsEmpty();
+    }
+    return;
+  }
+
+  const pos = stage.getPointerPosition();
+  if (!pos) return;
+  drawingPoints.push({ x: pos.x, y: pos.y });
+  renderDrawingPreview();
+}
+
+function onStageDblClick(e) {
+  if (!drawingMode) return;
+  if (drawingPoints.length < 3) {
+    toast('Need at least 3 points to form a polygon', 'error');
+    return;
+  }
+  finalizeRegion();
+}
+
+function renderDrawingPreview() {
+  drawLayer.destroyChildren();
+
+  if (drawingPoints.length > 1) {
+    const flatPts = [];
+    drawingPoints.forEach(p => { flatPts.push(p.x, p.y); });
+    const line = new Konva.Line({
+      points: flatPts,
+      stroke: '#7c6fef',
+      strokeWidth: 2,
+      dash: [6, 3],
+      closed: false,
+      listening: false,
+    });
+    drawLayer.add(line);
+  }
+
+  drawingPoints.forEach((p, i) => {
+    const circle = new Konva.Circle({
+      x: p.x,
+      y: p.y,
+      radius: 4,
+      fill: i === 0 ? '#ef6f7c' : '#7c6fef',
+      stroke: '#fff',
+      strokeWidth: 1,
+      listening: false,
+    });
+    drawLayer.add(circle);
+  });
+
+  drawLayer.draw();
+}
+
+function finalizeRegion() {
+  const normalizedPts = drawingPoints.map(p => stageToNormalized(p.x, p.y));
+
+  const idx = metadata.regions.length + 1;
+  const region = {
+    id: `region_${idx}`,
+    label: `Region ${idx}`,
+    shape: {
+      type: 'polygon',
+      points_normalized: normalizedPts,
+    },
+    gaze_trigger: {
+      dwell_time_ms: 1500,
+      min_confidence: 0.6,
+    },
+    heartbeat: null,
+    visual_effects: [{
+      type: 'breathing',
+      params: { amplitude: 0.15, frequency_hz: 0.25 },
+      trigger: 'on_gaze_dwell',
+      fade_in_ms: 3000,
+    }],
+  };
+
+  metadata.regions.push(region);
+  exitDrawingMode();
+  drawAllRegions();
+  renderRegionList();
+  selectRegion(metadata.regions.length - 1);
+  updateRegionCount();
+  toast('Region added', 'success');
+}
+
+/* ─── Region Selection ──────────────────────────────────────────────────── */
+function selectRegion(idx) {
+  selectedRegionIndex = idx;
+  drawAllRegions();
+  renderRegionList();
+  showPropsEditor(idx);
+}
+
+function showPropsEmpty() {
+  document.getElementById('props-empty').style.display = '';
+  document.getElementById('props-editor').style.display = 'none';
+  if (metadata && metadata.regions && metadata.regions.length > 0) {
+    document.getElementById('props-region-list').style.display = '';
+  } else {
+    document.getElementById('props-region-list').style.display = 'none';
+  }
+}
+
+function showPropsEditor(idx) {
+  document.getElementById('props-empty').style.display = 'none';
+  document.getElementById('props-region-list').style.display = '';
+  document.getElementById('props-editor').style.display = '';
+
+  const region = metadata.regions[idx];
+  if (!region) return;
+
+  document.getElementById('prop-label').value = region.label || '';
+  document.getElementById('prop-id').value = region.id || '';
+  document.getElementById('prop-dwell').value = region.gaze_trigger?.dwell_time_ms ?? 1500;
+  const conf = region.gaze_trigger?.min_confidence ?? 0.6;
+  document.getElementById('prop-confidence').value = conf;
+  document.getElementById('prop-confidence-val').textContent = conf.toFixed(2);
+
+  // Heartbeat
+  const hb = region.heartbeat;
+  document.getElementById('prop-heartbeat-file').value = hb?.file || '(none)';
+  document.getElementById('prop-heartbeat-fade').value = hb?.fade_in_ms ?? 2000;
+
+  // Visual effect (use first one)
+  const ve = region.visual_effects?.[0];
+  if (ve) {
+    document.getElementById('prop-effect-type').value = ve.type || 'breathing';
+    document.getElementById('prop-effect-amplitude').value = ve.params?.amplitude ?? 0.15;
+    document.getElementById('prop-effect-frequency').value = ve.params?.frequency_hz ?? 0.25;
+    document.getElementById('prop-effect-fade').value = ve.fade_in_ms ?? 3000;
+  }
+}
+
+function renderRegionList() {
+  const container = document.getElementById('region-list');
+  container.innerHTML = '';
+  if (!metadata || !metadata.regions) return;
+
+  metadata.regions.forEach((region, idx) => {
+    const item = document.createElement('div');
+    item.className = 'region-list-item' + (idx === selectedRegionIndex ? ' active' : '');
+
+    const color = REGION_COLORS[idx % REGION_COLORS.length];
+    const dot = `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};margin-right:6px;vertical-align:middle"></span>`;
+
+    item.innerHTML = `${dot}<span style="flex:1">${escHtml(region.label || region.id || 'Region ' + (idx+1))}</span><button class="remove-region">&times;</button>`;
+
+    item.querySelector('.remove-region').addEventListener('click', (e) => {
+      e.stopPropagation();
+      metadata.regions.splice(idx, 1);
+      if (selectedRegionIndex === idx) selectedRegionIndex = -1;
+      else if (selectedRegionIndex > idx) selectedRegionIndex--;
+      drawAllRegions();
+      renderRegionList();
+      if (selectedRegionIndex >= 0) showPropsEditor(selectedRegionIndex);
+      else showPropsEmpty();
+      updateRegionCount();
+    });
+
+    item.addEventListener('click', () => selectRegion(idx));
+    container.appendChild(item);
+  });
+}
+
+/* ─── Sync Properties Back to Metadata ──────────────────────────────────── */
+function syncPropsToMetadata() {
+  if (selectedRegionIndex < 0 || !metadata) return;
+  const region = metadata.regions[selectedRegionIndex];
+  if (!region) return;
+
+  const label = document.getElementById('prop-label').value.trim();
+  region.label = label;
+  region.id = slugify(label) || region.id;
+  document.getElementById('prop-id').value = region.id;
+
+  region.gaze_trigger = region.gaze_trigger || {};
+  region.gaze_trigger.dwell_time_ms = parseInt(document.getElementById('prop-dwell').value) || 1500;
+  region.gaze_trigger.min_confidence = parseFloat(document.getElementById('prop-confidence').value) || 0.6;
+
+  // Heartbeat
+  const hbFade = parseInt(document.getElementById('prop-heartbeat-fade').value) || 2000;
+  const hbFile = (region.heartbeat?.file) || '';
+  if (hbFile || region.heartbeat) {
+    region.heartbeat = region.heartbeat || {};
+    region.heartbeat.fade_in_ms = hbFade;
+  }
+
+  // Visual effect
+  const veType = document.getElementById('prop-effect-type').value;
+  const veAmplitude = parseFloat(document.getElementById('prop-effect-amplitude').value) || 0.15;
+  const veFrequency = parseFloat(document.getElementById('prop-effect-frequency').value) || 0.25;
+  const veFade = parseInt(document.getElementById('prop-effect-fade').value) || 3000;
+
+  if (!region.visual_effects || region.visual_effects.length === 0) {
+    region.visual_effects = [{}];
+  }
+  region.visual_effects[0] = {
+    type: veType,
+    params: { amplitude: veAmplitude, frequency_hz: veFrequency },
+    trigger: 'on_gaze_dwell',
+    fade_in_ms: veFade,
+  };
+
+  renderRegionList();
+  drawAllRegions();
+}
+
+/* ─── Save Metadata ─────────────────────────────────────────────────────── */
+async function saveMetadata() {
+  if (!currentImageId || !metadata) return;
+  syncPropsToMetadata();
+  try {
+    await apiFetch(`/images/${currentImageId}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(metadata),
+    });
+    toast('Metadata saved', 'success');
+  } catch (e) {
+    toast('Save failed: ' + e.message, 'error');
+  }
+}
+
+/* ─── Upload Image ──────────────────────────────────────────────────────── */
+function openUploadImageModal() {
+  document.getElementById('modal-upload-image').classList.remove('hidden');
+  document.getElementById('upload-title').value = '';
+  document.getElementById('upload-file').value = '';
+}
+
+function closeUploadImageModal() {
+  document.getElementById('modal-upload-image').classList.add('hidden');
+}
+
+async function confirmUploadImage() {
+  const title = document.getElementById('upload-title').value.trim() || 'Untitled';
+  const fileInput = document.getElementById('upload-file');
+  if (!fileInput.files.length) {
+    toast('Please select an image file', 'error');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('title', title);
+  fd.append('file', fileInput.files[0]);
+
+  try {
+    const result = await fetch(`${API}/images`, { method: 'POST', body: fd });
+    if (!result.ok) throw new Error(await result.text());
+    const data = await result.json();
+    toast('Image uploaded', 'success');
+    closeUploadImageModal();
+    await loadImageList();
+    selectImage(data.id);
+  } catch (e) {
+    toast('Upload failed: ' + e.message, 'error');
+  }
+}
+
+/* ─── Upload Audio ──────────────────────────────────────────────────────── */
+function openAudioUploadModal() {
+  if (!currentImageId) return;
+  document.getElementById('modal-upload-audio').classList.remove('hidden');
+  document.getElementById('audio-upload-file').value = '';
+}
+
+function closeAudioUploadModal() {
+  document.getElementById('modal-upload-audio').classList.add('hidden');
+}
+
+async function confirmUploadAudio() {
+  const fileInput = document.getElementById('audio-upload-file');
+  if (!fileInput.files.length) {
+    toast('Please select an audio file', 'error');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+
+  try {
+    const result = await fetch(`${API}/images/${currentImageId}/audio`, { method: 'POST', body: fd });
+    if (!result.ok) throw new Error(await result.text());
+    const data = await result.json();
+    toast('Audio uploaded: ' + data.filename, 'success');
+    closeAudioUploadModal();
+
+    // Update ambient audio in metadata
+    if (!metadata.audio) metadata.audio = {};
+    metadata.audio.ambient = metadata.audio.ambient || {
+      file: '',
+      loop: true,
+      fade_in_distance_cm: 200,
+      fade_in_complete_cm: 100,
+      fade_curve: 'ease_in_out',
+    };
+    metadata.audio.ambient.file = data.path;
+  } catch (e) {
+    toast('Audio upload failed: ' + e.message, 'error');
+  }
+}
+
+/* ─── Heartbeat Audio Upload ────────────────────────────────────────────── */
+async function uploadHeartbeatAudio() {
+  if (selectedRegionIndex < 0 || !currentImageId) return;
+  const fileInput = document.getElementById('input-heartbeat-file');
+  if (!fileInput.files.length) return;
+
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+
+  try {
+    const result = await fetch(`${API}/images/${currentImageId}/audio`, { method: 'POST', body: fd });
+    if (!result.ok) throw new Error(await result.text());
+    const data = await result.json();
+    toast('Heartbeat audio uploaded', 'success');
+
+    const region = metadata.regions[selectedRegionIndex];
+    region.heartbeat = region.heartbeat || {
+      file: '',
+      loop: true,
+      bass_boost: true,
+      fade_in_ms: 2000,
+      intensity_by_distance: { max_distance_cm: 150, min_distance_cm: 30, curve: 'exponential' },
+    };
+    region.heartbeat.file = data.path;
+    document.getElementById('prop-heartbeat-file').value = data.path;
+  } catch (e) {
+    toast('Heartbeat upload failed: ' + e.message, 'error');
+  }
+}
+
+/* ─── Status Bar ────────────────────────────────────────────────────────── */
+function updateRegionCount() {
+  const n = metadata?.regions?.length ?? 0;
+  document.getElementById('status-regions').textContent = `${n} region${n !== 1 ? 's' : ''}`;
+}
+
+/* ─── Event Wiring ──────────────────────────────────────────────────────── */
+function wireEvents() {
+  // Save
+  document.getElementById('btn-save').addEventListener('click', saveMetadata);
+
+  // Draw mode
+  document.getElementById('btn-draw').addEventListener('click', () => {
+    if (drawingMode) exitDrawingMode();
+    else enterDrawingMode();
+  });
+  document.getElementById('btn-cancel-draw').addEventListener('click', exitDrawingMode);
+
+  // Fit view
+  document.getElementById('btn-zoom-fit').addEventListener('click', fitImage);
+
+  // Upload image modal
+  document.getElementById('btn-upload-image').addEventListener('click', openUploadImageModal);
+  document.getElementById('upload-cancel').addEventListener('click', closeUploadImageModal);
+  document.getElementById('upload-confirm').addEventListener('click', confirmUploadImage);
+  document.getElementById('modal-upload-image').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeUploadImageModal();
+  });
+
+  // Upload audio modal
+  document.getElementById('btn-upload-audio').addEventListener('click', openAudioUploadModal);
+  document.getElementById('audio-upload-cancel').addEventListener('click', closeAudioUploadModal);
+  document.getElementById('audio-upload-confirm').addEventListener('click', confirmUploadAudio);
+  document.getElementById('modal-upload-audio').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeAudioUploadModal();
+  });
+
+  // Heartbeat audio
+  document.getElementById('btn-pick-heartbeat').addEventListener('click', () => {
+    document.getElementById('input-heartbeat-file').click();
+  });
+  document.getElementById('input-heartbeat-file').addEventListener('change', uploadHeartbeatAudio);
+
+  // Confidence slider display
+  document.getElementById('prop-confidence').addEventListener('input', (e) => {
+    document.getElementById('prop-confidence-val').textContent = parseFloat(e.target.value).toFixed(2);
+  });
+
+  // Sync properties on change
+  const propInputs = ['prop-label', 'prop-dwell', 'prop-confidence', 'prop-heartbeat-fade',
+                      'prop-effect-type', 'prop-effect-amplitude', 'prop-effect-frequency', 'prop-effect-fade'];
+  propInputs.forEach(id => {
+    const el = document.getElementById(id);
+    el.addEventListener('change', syncPropsToMetadata);
+    if (el.type === 'text' || el.type === 'number') {
+      el.addEventListener('blur', syncPropsToMetadata);
+    }
+  });
+
+  // Delete region
+  document.getElementById('btn-delete-region').addEventListener('click', () => {
+    if (selectedRegionIndex < 0 || !metadata) return;
+    metadata.regions.splice(selectedRegionIndex, 1);
+    selectedRegionIndex = -1;
+    drawAllRegions();
+    renderRegionList();
+    showPropsEmpty();
+    updateRegionCount();
+  });
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && drawingMode) exitDrawingMode();
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      saveMetadata();
+    }
+  });
+}
+
+/* ─── Init ──────────────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', () => {
+  initKonva();
+  wireEvents();
+  loadImageList();
+});
+</script>
+</body>
+</html>

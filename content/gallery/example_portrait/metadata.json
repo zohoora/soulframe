@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "id": "example_portrait",
+  "title": "Example Portrait",
+
+  "image": {
+    "filename": "image.jpg",
+    "width": 1920,
+    "height": 1080
+  },
+
+  "audio": {
+    "ambient": {
+      "file": "audio/ambient.wav",
+      "loop": true,
+      "fade_in_distance_cm": 200,
+      "fade_in_complete_cm": 100,
+      "fade_curve": "ease_in_out"
+    }
+  },
+
+  "regions": [
+    {
+      "id": "person_example",
+      "label": "Example Person",
+      "shape": {
+        "type": "polygon",
+        "points_normalized": [[0.3, 0.1], [0.7, 0.1], [0.7, 0.9], [0.3, 0.9]]
+      },
+      "gaze_trigger": {
+        "dwell_time_ms": 1500,
+        "min_confidence": 0.6
+      },
+      "heartbeat": {
+        "file": "audio/heartbeat.wav",
+        "loop": true,
+        "bass_boost": true,
+        "fade_in_ms": 2000,
+        "intensity_by_distance": {
+          "max_distance_cm": 150,
+          "min_distance_cm": 30,
+          "curve": "exponential"
+        }
+      },
+      "visual_effects": [
+        {
+          "type": "breathing",
+          "params": { "amplitude": 0.008, "frequency_hz": 0.25 },
+          "trigger": "on_gaze_dwell",
+          "fade_in_ms": 3000
+        }
+      ]
+    }
+  ],
+
+  "interaction": {
+    "min_interaction_distance_cm": 300,
+    "close_interaction_distance_cm": 80
+  },
+
+  "transitions": {
+    "fade_in_ms": 2000,
+    "fade_out_ms": 2000,
+    "audio_crossfade_ms": 3000
+  }
+}

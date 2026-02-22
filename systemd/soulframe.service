@@ -1,0 +1,30 @@
+[Unit]
+Description=Soul Frame - Interactive Art Installation
+After=network.target graphical.target sound.target
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=arash
+Group=arash
+WorkingDirectory=/home/arash/soulframe
+Environment=DISPLAY=:0
+Environment=SOULFRAME_ROOT=/home/arash/soulframe
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/arash/soulframe/.venv/bin/python -m soulframe --log-level INFO
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Performance: keep Jetson at max clocks
+ExecStartPre=/usr/bin/sudo /usr/sbin/nvpmodel -m 0
+ExecStartPre=/usr/bin/sudo /usr/bin/jetson_clocks
+
+# Resource limits
+LimitNOFILE=65536
+Nice=-5
+
+[Install]
+WantedBy=graphical.target

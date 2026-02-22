@@ -1,0 +1,26 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.engine
+*.trt
+.claude/
+
+# Content (user-specific, potentially large)
+content/gallery/*/image.jpg
+content/gallery/*/image.png
+content/gallery/*/audio/*.wav
+
+# Models (large binary files)
+models/*.onnx
+models/*.engine
+
+# Calibration data (device-specific)
+calibration/*.json
+
+# OS
+.DS_Store
+Thumbs.db

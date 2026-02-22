@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soulframe"
+version = "0.1.0"
+description = "Interactive art installation — photographs that respond to viewer presence and gaze"
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.19",
+    "opencv-python>=4.5",
+    "pyglet>=2.0",
+    "sounddevice>=0.4",
+    "soundfile>=0.10",
+    "scipy>=1.5",
+    "pydantic>=1.8",
+    "fastapi>=0.68",
+    "uvicorn>=0.15",
+    "python-multipart>=0.0.5",
+    "aiofiles>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+soulframe = "soulframe.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["soulframe*"]
