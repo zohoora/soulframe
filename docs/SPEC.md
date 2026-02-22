@@ -13,9 +13,13 @@
 4. [IPC: Shared Memory Struct](#ipc-shared-memory-struct)
 5. [Interaction State Machine](#interaction-state-machine)
 6. [Image Data Model](#image-data-model)
-7. [Tech Stack](#tech-stack)
-8. [Development Phases](#development-phases)
-9. [Known Blockers](#known-blockers)
+7. [Audio Engine](#audio-engine)
+8. [Display Engine](#display-engine)
+9. [Authoring Tool](#authoring-tool)
+10. [Tech Stack](#tech-stack)
+11. [Configuration](#configuration)
+12. [Development Phases](#development-phases)
+13. [Known Blockers](#known-blockers)
 
 ---
 
@@ -68,6 +72,7 @@ Four Python processes communicating via `multiprocessing.Queue` (commands) and `
                     |   (Coordinator)   |
                     |   State Machine   |
                     |   Image Manager   |
+                    |   Interaction     |
                     +--------+----------+
                              |
               +--------------+--------------+
@@ -77,9 +82,16 @@ Four Python processes communicating via `multiprocessing.Queue` (commands) and `
      |  Process   |   |  Process   |  |   Process   |
      | Camera     |   | Pyglet/GL  |  | sounddevice |
      | Face Det.  |   | Shaders    |  | Custom mixer|
-     | Gaze Est.  |   | Fullscreen |  | 2.1 routing |
+     | Gaze Est.  |   | Effects    |  | Bass-boost  |
+     | Distance   |   | Fullscreen |  | Fade curves |
      +------------+   +------------+  +-------------+
 ```
+
+### Process Communication
+
+- **Vision → Brain:** Shared memory with seqlock (44 bytes at ~30 Hz).
+- **Brain → Display:** `multiprocessing.Queue` carrying `Command` dataclasses.
+- **Brain → Audio:** `multiprocessing.Queue` carrying `Command` dataclasses.
 
 ### Why Multi-Process
 
@@ -89,29 +101,54 @@ Four Python processes communicating via `multiprocessing.Queue` (commands) and `
 - **Vision** is CPU+GPU heavy (face detection, gaze estimation).
 - **Orin NX has 8 cores** -- multi-process takes full advantage of the hardware.
 
+### Process Lifecycle
+
+All child processes are spawned with `daemon=False` to ensure proper cleanup of shared resources (e.g. shared memory segments). The brain process monitors child liveness and shuts down if any child dies. Shutdown is coordinated via `SHUTDOWN` commands sent over the queues.
+
 ---
 
 ## IPC: Shared Memory Struct
 
 **Direction:** Vision --> Brain, updated at approximately 30 Hz.
 
+### Seqlock Protocol
+
+The shared memory segment is **44 bytes** total: a 4-byte seqlock counter followed by the 40-byte data payload. The seqlock prevents torn reads on architectures where a 40-byte memcpy is not atomic (e.g. aarch64/Jetson).
+
 ```
 Offset  Size   Field
 ------  ----   -----
-0       4      frame_counter (uint32)
-4       4      num_faces (uint32)
-8       4      face_distance_cm (float32)
-12      4      gaze_screen_x (float32)     -- normalized 0.0-1.0
-16      4      gaze_screen_y (float32)     -- normalized 0.0-1.0
-20      4      gaze_confidence (float32)
-24      4      head_yaw (float32)
-28      4      head_pitch (float32)
-32      8      timestamp_ns (uint64)
+0       4      seqlock_counter (uint32)  -- even = stable, odd = write in progress
+4       4      frame_counter (uint32)
+8       4      num_faces (uint32)
+12      4      face_distance_cm (float32)
+16      4      gaze_screen_x (float32)     -- normalized 0.0-1.0
+20      4      gaze_screen_y (float32)     -- normalized 0.0-1.0
+24      4      gaze_confidence (float32)
+28      4      head_yaw (float32)          -- radians
+32      4      head_pitch (float32)        -- radians
+36      8      timestamp_ns (uint64)
 ------  ----
-Total: 40 bytes
+Total: 44 bytes (4 seqlock + 40 data)
 ```
 
-All spatial coordinates are normalized to 0.0--1.0 where applicable. The Brain process reads this struct each tick to drive the state machine. Commands from Brain to Display and Audio travel over `multiprocessing.Queue`.
+**Writer protocol (vision process):**
+1. Increment seqlock counter to odd (write-in-progress).
+2. Memory fence (`__sync_synchronize` / dmb on ARM).
+3. Write data payload.
+4. Memory fence.
+5. Increment seqlock counter to even (write-complete).
+
+**Reader protocol (brain process):**
+1. Read seqlock counter → `seq1`. If odd, skip (write in progress).
+2. Memory fence.
+3. Read data payload.
+4. Memory fence.
+5. Read seqlock counter → `seq2`. If `seq1 != seq2`, discard (torn read).
+
+If the shared memory segment becomes inaccessible (vision process crash), the reader catches `BufferError`/`ValueError`/`OSError` and synthesizes a zero-face `FaceData` so the brain can transition gracefully to IDLE.
+
+All spatial coordinates are normalized to 0.0--1.0 where applicable. Commands from Brain to Display and Audio travel over `multiprocessing.Queue`.
 
 ---
 
@@ -120,40 +157,37 @@ All spatial coordinates are normalized to 0.0--1.0 where applicable. The Brain p
 ### State Diagram
 
 ```
-                        face_lost (5s timeout)
-             +------------------------------------------+
-             |                                          |
-             v            face_detected                 |
-       +----------+    (distance < 300cm)         +-----+------+
-       |          +-----------------------------> |            |
-       |   IDLE   |                               |  PRESENCE  |
-       |          | <-----------------------------+            |
-       +----+-----+    face_lost (3s timeout)     +-----+------+
-            |                                           |
-            | (5 min timer)                             | gaze_on_region
-            +---> [next image]                          | (dwell > 1.5s)
-                                                        v
-                                                  +-----+------+
-                                                  |  ENGAGED   |
-                                                  +-----+------+
-                                                        |
-                                                        | distance < 80cm
-                                                        v
-                                                  +-----+------+
-                                                  |   CLOSE    |
-                                                  | INTERACTION|
-                                                  +-----+------+
-                                                        |
-                                                        | face_lost or
-                                                        | gaze_away 8s
-                                                        v
-                                                  +-----+------+
-                                                  | WITHDRAWING|
-                                                  +-----+------+
-                                                        |
-                                                        | fade complete
-                                                        v
-                                                   back to IDLE
+                   face_lost (3s) or
+                   distance >= 300cm
+             +---------------------------+
+             |                           |
+             v       face_detected       |
+       +----------+ (distance < 300cm)   |
+       |          +--------------------> +-----+------+
+       |   IDLE   |                      |  PRESENCE  |
+       |          |                      |            |
+       +----+-----+                      +-----+------+
+            ^                                  |
+            |  (5 min timer)                   | gaze_on_region
+            +---> [next image]                 | (dwell > 1.5s)
+            |                                  v
+            |                            +-----+------+
+            |                            |  ENGAGED   +<-----+
+            |                            +-----+------+      |
+            |                                  |             |
+            |                                  | dist < 80cm | dist > 120cm
+            |                                  v             | (hysteresis)
+            |                            +-----+------+      |
+            |                            |   CLOSE    +------+
+            |                            | INTERACTION|
+            |                            +-----+------+
+            |                                  |
+            |  fade complete               face_lost 5s or
+            |                              gaze_away 8s
+       +----+-----+                           |
+       |WITHDRAWING| <------------------------+
+       +----------+   (also from ENGAGED:
+                       face_lost 5s or gaze_away 8s)
 ```
 
 ### State Behavior Table
@@ -163,20 +197,26 @@ All spatial coordinates are normalized to 0.0--1.0 where applicable. The Brain p
 | **IDLE** | Normal picture frame. Images cycle every 5 min. | Silent | Static image, very subtle Ken Burns |
 | **PRESENCE** | Viewer detected. Image cycle paused. | Ambient audio fades in (volume scales with distance) | Ken Burns, gentle parallax |
 | **ENGAGED** | Gaze locked on a person region for 1.5 s+ | Heartbeat begins. Bass scales with distance | Region-specific effects (breathing, etc.) |
-| **CLOSE** | Viewer very close (< 80 cm) | Full bass, maximum heartbeat | All effects peak, vignette |
-| **WITHDRAWING** | Viewer leaving. 3--5 s graceful fade. | All audio fades to zero | Effects ease back to static |
+| **CLOSE_INTERACTION** | Viewer very close (< 80 cm) | Full bass, maximum heartbeat | All effects peak, vignette |
+| **WITHDRAWING** | Viewer leaving. Graceful fade to static. | All audio fades to zero | Effects ease back to static |
 
-### Transition Summary
+### Transition Table
 
-| From | To | Trigger |
-|------|----|---------|
-| IDLE | PRESENCE | `face_detected` AND `distance < 300 cm` |
-| PRESENCE | IDLE | `face_lost` for 3 s |
-| PRESENCE | ENGAGED | `gaze_on_region` dwell > 1.5 s |
-| ENGAGED | CLOSE | `distance < 80 cm` |
-| CLOSE | WITHDRAWING | `face_lost` OR `gaze_away` for 8 s |
-| WITHDRAWING | IDLE | Fade complete (3--5 s) |
-| Any state | IDLE | `face_lost` for 5 s (global timeout) |
+| From | To | Trigger | Timeout |
+|------|----|---------|---------|
+| IDLE | PRESENCE | `face_detected` AND `distance < 300 cm` | — |
+| PRESENCE | WITHDRAWING | `face_lost` | 3 s (`PRESENCE_LOST_TIMEOUT_S`) |
+| PRESENCE | WITHDRAWING | `distance >= presence_distance` | — |
+| PRESENCE | ENGAGED | `gaze_on_region` dwell threshold met | per-region `dwell_time_ms` (default 1500 ms) |
+| ENGAGED | CLOSE_INTERACTION | `distance < 80 cm` | — |
+| ENGAGED | WITHDRAWING | `face_lost` | 5 s (`IDLE_FACE_LOST_TIMEOUT_S`) |
+| ENGAGED | WITHDRAWING | `gaze_away` (no region active) | 8 s (`WITHDRAW_GAZE_AWAY_TIMEOUT_S`) |
+| CLOSE_INTERACTION | ENGAGED | `distance > close_distance * 1.5` (hysteresis) | — |
+| CLOSE_INTERACTION | WITHDRAWING | `face_lost` | 5 s (`IDLE_FACE_LOST_TIMEOUT_S`) |
+| CLOSE_INTERACTION | WITHDRAWING | `gaze_away` | 8 s (`WITHDRAW_GAZE_AWAY_TIMEOUT_S`) |
+| WITHDRAWING | IDLE | Fade complete | `WITHDRAW_FADE_DURATION_S` (default 4 s) |
+
+The withdraw fade duration can be overridden per-image via `transitions.fade_out_ms` in metadata.json. Minimum duration is clamped to 0.1 s.
 
 ---
 
@@ -195,15 +235,17 @@ content/gallery/portrait_001/
 
 Each portrait lives in its own directory under `content/gallery/`. The directory contains:
 
-- **image.jpg** -- The photograph to display (JPEG or PNG).
+- **image.jpg** -- The photograph to display (JPEG, PNG, BMP, TIFF, or WebP).
 - **metadata.json** -- All metadata, regions, audio mappings, and effect definitions.
 - **audio/** -- Audio assets referenced by `metadata.json`.
+
+Path traversal is prevented: all file paths in metadata.json are validated to remain within the portrait directory.
 
 ### metadata.json Schema
 
 ```json
 {
-  "version": "1.0",
+  "version": 1,
   "id": "portrait_001",
   "title": "Maria at the Window",
 
@@ -217,8 +259,8 @@ Each portrait lives in its own directory under `content/gallery/`. The directory
     "ambient": {
       "file": "audio/ambient.wav",
       "loop": true,
-      "fade_in_distance_cm": 300,
-      "fade_in_complete_cm": 150,
+      "fade_in_distance_cm": 200,
+      "fade_in_complete_cm": 100,
       "fade_curve": "ease_in_out"
     }
   },
@@ -246,10 +288,9 @@ Each portrait lives in its own directory under `content/gallery/`. The directory
         "bass_boost": true,
         "fade_in_ms": 2000,
         "intensity_by_distance": {
-          "300": 0.0,
-          "150": 0.3,
-          "80": 0.7,
-          "30": 1.0
+          "max_distance_cm": 150,
+          "min_distance_cm": 30,
+          "curve": "exponential"
         }
       },
       "visual_effects": [
@@ -259,7 +300,7 @@ Each portrait lives in its own directory under `content/gallery/`. The directory
             "amplitude": 0.003,
             "frequency_hz": 0.25
           },
-          "trigger": "gaze_dwell",
+          "trigger": "on_gaze_dwell",
           "fade_in_ms": 3000
         },
         {
@@ -281,34 +322,135 @@ Each portrait lives in its own directory under `content/gallery/`. The directory
   },
 
   "transitions": {
-    "fade_in_ms": 1500,
-    "fade_out_ms": 1500,
-    "audio_crossfade_ms": 2000
+    "fade_in_ms": 2000,
+    "fade_out_ms": 2000,
+    "audio_crossfade_ms": 3000
   }
 }
 ```
 
 ### Field Reference
 
-- **version** -- Schema version string for forward compatibility.
+- **version** -- Schema version integer for forward compatibility (currently `1`).
 - **id** -- Unique identifier matching the directory name.
 - **title** -- Human-readable title (used in authoring UI).
 - **image.filename** -- Relative path to the image file within the portrait directory.
 - **image.width / image.height** -- Native resolution in pixels.
 - **audio.ambient** -- Background audio that plays during PRESENCE and beyond.
-  - `fade_in_distance_cm` / `fade_in_complete_cm` -- Distance range over which volume ramps from 0 to 1.
-  - `fade_curve` -- Easing function name (`linear`, `ease_in`, `ease_out`, `ease_in_out`).
+  - `fade_in_distance_cm` -- Distance at which ambient volume starts ramping up (default: 200 cm).
+  - `fade_in_complete_cm` -- Distance at which ambient volume reaches full (default: 100 cm).
+  - `fade_curve` -- Easing function name (see [Audio Engine > Distance Curves](#distance-curves)).
 - **regions[]** -- Interactive regions of the image, each with its own triggers and effects.
+  - `id` -- Unique region identifier. Auto-generated if empty; duplicates get a `_N` suffix.
   - `shape.points_normalized` -- Polygon vertices in normalized coordinates (0.0--1.0).
-  - `gaze_trigger.dwell_time_ms` -- How long gaze must dwell before triggering ENGAGED state.
-  - `gaze_trigger.min_confidence` -- Minimum gaze confidence required to count as "looking at" region.
-  - `heartbeat.intensity_by_distance` -- Maps distance (cm) to intensity (0.0--1.0). Interpolated linearly.
-  - `visual_effects[].type` -- Effect type (`breathing`, `vignette`, `parallax`, `glow`, etc.).
-  - `visual_effects[].trigger` -- When the effect activates (`gaze_dwell`, `close_interaction`, `presence`).
+  - `gaze_trigger.dwell_time_ms` -- How long gaze must dwell before triggering ENGAGED state (default: 1500 ms).
+  - `gaze_trigger.min_confidence` -- Minimum gaze confidence required to count as "looking at" region (default: 0.6).
+  - `heartbeat.file` -- Path to heartbeat audio file (relative to portrait directory).
+  - `heartbeat.bass_boost` -- Whether to apply bass-boost EQ (default: true).
+  - `heartbeat.fade_in_ms` -- Fade-in duration when heartbeat starts (default: 2000 ms).
+  - `heartbeat.intensity_by_distance` -- Distance-to-volume mapping config:
+    - `max_distance_cm` -- Distance at which heartbeat volume is 0.0 (default: 150).
+    - `min_distance_cm` -- Distance at which heartbeat volume is 1.0 (default: 30).
+    - `curve` -- Curve function name (default: `"exponential"`).
+  - `visual_effects[].type` -- Effect type: `breathing`, `vignette`, `parallax`, `kenburns`.
+  - `visual_effects[].trigger` -- When the effect activates: `on_gaze_dwell`, `close_interaction`, `presence`.
+  - `visual_effects[].fade_in_ms` -- How long the effect takes to reach full intensity (default: 3000 ms).
+  - `visual_effects[].params` -- Effect-specific parameters (amplitude, frequency_hz, radius, softness, etc.).
 - **interaction** -- Global distance thresholds for this portrait.
+  - `min_interaction_distance_cm` -- IDLE→PRESENCE threshold (default: 300 cm).
+  - `close_interaction_distance_cm` -- ENGAGED→CLOSE_INTERACTION threshold (default: 80 cm).
 - **transitions** -- Timing for image transitions and audio crossfades.
+  - `fade_in_ms` -- Image fade-in duration (default: 2000 ms).
+  - `fade_out_ms` -- Image/effect fade-out duration and withdraw duration (default: 2000 ms).
+  - `audio_crossfade_ms` -- Audio crossfade during image transitions (default: 3000 ms).
 
 All spatial coordinates are normalized to 0.0--1.0 (relative to image dimensions).
+
+---
+
+## Audio Engine
+
+### Distance Curves
+
+The audio engine maps viewer distance to volume using configurable curve functions. Each curve takes three parameters: `distance_cm`, `max_dist` (volume = 0.0), and `min_dist` (volume = 1.0).
+
+| Curve Name | Aliases | Behavior |
+|-----------|---------|----------|
+| `linear` | — | Straight-line falloff |
+| `ease_in` | — | Quadratic ease-in (slow start, fast end) |
+| `ease_out` | — | Quadratic ease-out (fast start, slow end) |
+| `ease_in_out` | `smoothstep` | Hermite smoothstep (gentle at both extremes) |
+| `exponential` | `exp` | Exponential falloff (drops quickly then tapers) |
+
+### Bass Boost
+
+Heartbeat audio can optionally be processed with a parametric bass-boost EQ:
+- Center frequency: 60 Hz
+- Q factor: 0.7
+- Gain: +12 dB
+
+This emphasizes the sub-bass content that the TPA3116D2 crossover routes to the bass exciter.
+
+### Mixer
+
+The audio mixer operates on a sounddevice output stream callback thread at 44100 Hz stereo. It supports named streams (`"ambient"`, `"heartbeat_{region_id}"`), per-stream volume fading, and global fade-all. Inactive streams (volume at 0.0 and target at 0.0) are automatically cleaned up.
+
+---
+
+## Display Engine
+
+### Effects
+
+Four shader-driven effects, each with smooth parameter transitions using framerate-independent exponential smoothing (`1 - e^(-speed * dt)`):
+
+| Effect | Parameters | Description |
+|--------|-----------|-------------|
+| `breathing` | amplitude, frequency, center, radius, intensity | Pulsing glow on a region |
+| `parallax` | depth_scale, intensity | Gaze-reactive parallax shift |
+| `kenburns` | zoom_speed, pan_dir, intensity | Slow zoom/pan (active in IDLE+PRESENCE) |
+| `vignette` | softness, radius, intensity | Edge darkening (peaks in CLOSE_INTERACTION) |
+
+The `fade_in_ms` parameter in visual effects overrides the transition speed so that a full 0→1 transition takes approximately that many milliseconds.
+
+### Rendering
+
+- Fullscreen pyglet window with OpenGL 3.3.
+- Composite GLSL fragment shader receives all effect uniforms per frame.
+- Texture crossfade between images with configurable duration.
+- Texture ring-buffer (3 slots) defers GPU texture deletion by at least 2 frames.
+
+---
+
+## Authoring Tool
+
+A web-based tool for creating and editing portrait metadata.
+
+### Backend
+
+- **Framework:** FastAPI, served via uvicorn.
+- **Bind address:** `127.0.0.1:8080` by default (configurable via `SOULFRAME_AUTHORING_HOST` / `SOULFRAME_AUTHORING_PORT`).
+- **Security:**
+  - CORS restricted to localhost origins (configurable via `SOULFRAME_CORS_ORIGINS`).
+  - Optional API key authentication for mutating requests (`SOULFRAME_API_KEY` env var). Uses timing-safe comparison (`hmac.compare_digest`).
+  - Upload size limits: 50 MB for images, 100 MB for audio.
+  - Path traversal protection on all file operations.
+
+### Frontend
+
+- **Canvas:** Konva.js for drawing polygon regions over the portrait image.
+- **SPA:** Served as static files from `authoring/frontend/`.
+
+### API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/images` | List all gallery images with summary info |
+| GET | `/api/images/{id}` | Full metadata.json for one image |
+| PUT | `/api/images/{id}` | Overwrite metadata.json |
+| POST | `/api/images` | Upload a new image (multipart form) |
+| POST | `/api/images/{id}/audio` | Upload an audio file |
+| DELETE | `/api/images/{id}` | Delete an image and its directory |
+| GET | `/api/images/{id}/file` | Serve the actual image file |
 
 ---
 
@@ -318,13 +460,49 @@ All spatial coordinates are normalized to 0.0--1.0 (relative to image dimensions
 |-----------|-----------|-----------|
 | Language | Python 3.8+ | Jetson ecosystem, ML libraries |
 | Face detection | MediaPipe or YuNet (OpenCV built-in fallback) | Lightweight, frees GPU |
-| Gaze estimation | Head-pose via solvePnP (upgradeable to MobileGaze/TensorRT) | No extra model needed |
+| Gaze estimation | Head-pose via solvePnP (upgradeable to ONNX/TensorRT) | No extra model needed initially |
 | Distance estimation | Iris landmark or face bbox size fallback | No extra sensor |
 | Display | Pyglet 2.x + GLSL shaders (OpenGL 3.3) | Direct GPU, fullscreen |
 | Audio | sounddevice + custom float32 mixer via ReSpeaker DAC | Stereo out to 2.1 amp |
-| IPC | multiprocessing.Queue + SharedMemory | Low latency, no deps |
+| IPC | multiprocessing.Queue + SharedMemory + seqlock | Low latency, no deps |
 | Authoring | FastAPI + Konva.js | Web-based region editor |
-| Config | JSON + Pydantic | Declarative, validated |
+| Config | JSON metadata + Python constants | Declarative, per-image overrides |
+| Validation | Pydantic v2 (authoring API) | Schema enforcement for metadata |
+
+---
+
+## Configuration
+
+All defaults are defined in `soulframe/config.py`. Per-image overrides are read from each portrait's `metadata.json`.
+
+### Default Values
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `DISPLAY_WIDTH` | 1920 | Display resolution width |
+| `DISPLAY_HEIGHT` | 1080 | Display resolution height |
+| `DISPLAY_FPS` | 60 | Target display framerate |
+| `CAMERA_INDEX` | 0 | V4L2 camera device index |
+| `CAMERA_WIDTH` | 640 | Camera capture width |
+| `CAMERA_HEIGHT` | 480 | Camera capture height |
+| `CAMERA_FPS` | 30 | Camera capture framerate |
+| `AUDIO_SAMPLE_RATE` | 44100 | Audio output sample rate |
+| `AUDIO_CHANNELS` | 2 | Stereo output |
+| `AUDIO_BLOCK_SIZE` | 1024 | sounddevice block size |
+| `AUDIO_DEVICE_NAME` | `"seeed"` | Substring match for ReSpeaker |
+| `IDLE_IMAGE_CYCLE_SECONDS` | 300 | 5 minutes between image cycles |
+| `PRESENCE_DISTANCE_CM` | 300 | IDLE→PRESENCE threshold |
+| `CLOSE_INTERACTION_DISTANCE_CM` | 80 | ENGAGED→CLOSE threshold |
+| `PRESENCE_LOST_TIMEOUT_S` | 3.0 | Face-lost timeout in PRESENCE |
+| `IDLE_FACE_LOST_TIMEOUT_S` | 5.0 | Face-lost timeout (global) |
+| `GAZE_DWELL_MS` | 1500 | Default gaze dwell time |
+| `GAZE_MIN_CONFIDENCE` | 0.6 | Default minimum gaze confidence |
+| `WITHDRAW_GAZE_AWAY_TIMEOUT_S` | 8.0 | Gaze-away timeout |
+| `WITHDRAW_FADE_DURATION_S` | 4.0 | Default withdraw fade |
+| `DEFAULT_FADE_IN_MS` | 2000 | Default image fade-in |
+| `DEFAULT_FADE_OUT_MS` | 2000 | Default image fade-out |
+| `DEFAULT_AUDIO_CROSSFADE_MS` | 3000 | Default audio crossfade |
+| `VISION_STALE_TIMEOUT_S` | 2.0 | Expire stale vision data |
 
 ---
 
@@ -393,7 +571,7 @@ Full interaction loop: IDLE through CLOSE INTERACTION and WITHDRAWING, driven by
 - ENGAGED activates region-specific effects and heartbeat.
 - CLOSE INTERACTION peaks all effects.
 - WITHDRAWING gracefully fades everything back to IDLE.
-- Global 5-second face-lost timeout returns to IDLE from any state.
+- Global 5-second face-lost timeout returns to WITHDRAWING from ENGAGED/CLOSE states.
 
 ### Phase 6 -- Authoring Tool
 
@@ -403,7 +581,7 @@ Web-based tool for creating and editing portrait metadata (region polygons, audi
 - FastAPI backend serves the authoring UI and reads/writes metadata.json.
 - Konva.js canvas allows drawing polygon regions over the portrait image.
 - Audio file upload and assignment to regions works.
-- Effect parameters are editable with live preview.
+- Effect parameters are editable.
 - Saved metadata validates against the schema and is loadable by Brain.
 
 ---
