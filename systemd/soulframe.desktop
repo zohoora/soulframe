@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Soul Frame
+Comment=Interactive art installation
+Exec=/home/arash/soulframe/.venv/bin/python -m soulframe
+Path=/home/arash/soulframe
+Terminal=false
+Hidden=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=10

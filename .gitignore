@@ -9,17 +9,19 @@ build/
 *.trt
 .claude/
 
-# Content (user-specific, potentially large)
+# Content media (large files — metadata.json IS tracked)
 content/gallery/*/image.jpg
 content/gallery/*/image.png
 content/gallery/*/audio/*.wav
 
-# Models (large binary files)
+# Models (large binary files, but keep the directory)
 models/*.onnx
 models/*.engine
+!models/.gitkeep
 
-# Calibration data (device-specific)
+# Calibration data (device-specific, but keep the directory)
 calibration/*.json
+!calibration/.gitkeep
 
 # OS
 .DS_Store
