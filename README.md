@@ -15,9 +15,9 @@ cd soulframe
 
 | Component | Details |
 |-----------|---------|
-| Jetson Orin NX Dev Kit | JetPack 5.1.3, Ubuntu 20.04 |
+| Jetson Orin NX 16GB (Seeed reComputer J4012) | JetPack 6.2.1, Ubuntu 22.04, L4T R36.4.3 |
 | ASUS ZenScreen 16" OLED | mini-HDMI connection |
-| Arducam GMSL2 8MP (IMX219) | USB webcam fallback supported |
+| Arducam GMSL2 8MP (IMX219) | CSI-2 via GMSL2 SerDes on CAM0 (USB webcam fallback supported) |
 | HiLetgo TPA3116D2 2.1 amp | Drives all three exciters |
 | 2x Dayton DAEX25FHE-4 | Voice exciters (L/R) |
 | 1x Dayton TT25-8 | Bass exciter (Sub) |
@@ -139,7 +139,7 @@ Four Python processes communicate via shared memory and command queues:
 
 Vision writes a 44-byte struct (4-byte seqlock + 40-byte data) to shared memory at ~30 Hz. Brain reads it to drive a 5-state interaction state machine (IDLE, PRESENCE, ENGAGED, CLOSE_INTERACTION, WITHDRAWING). Commands to Display and Audio flow over `multiprocessing.Queue`.
 
-See `docs/SPEC.md` for the full technical specification.
+See `docs/SPEC.md` for the full technical specification and `docs/HARDWARE_AND_PLATFORM.md` for detailed hardware capabilities, constraints, and pitfalls.
 
 ## Project Structure
 

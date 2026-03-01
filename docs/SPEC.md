@@ -38,9 +38,9 @@ Soul Frame is a technical art installation: a 16" OLED display in a 3D-printed f
 
 | Component | Model | Connection | Notes |
 |-----------|-------|------------|-------|
-| Computer | NVIDIA Jetson Orin NX Dev Kit | - | JetPack 5.1.3, Ubuntu 20.04, 16 GB RAM |
+| Computer | NVIDIA Jetson Orin NX 16GB (Seeed reComputer J4012) | - | JetPack 6.2.1, Ubuntu 22.04, L4T R36.4.3, 16 GB RAM |
 | Display | ASUS ZenScreen 16" OLED | mini-HDMI | USB-C DP Alt Mode NOT supported by Jetson |
-| Camera | Arducam GMSL2 8MP (IMX219) | 22-pin flex + FAKRA coax | V4L2 compatible |
+| Camera | Arducam GMSL2 8MP (IMX219) | 22-pin flex + FAKRA coax (via GMSL2 SerDes) | Uses nvarguscamerasrc (ISP), not V4L2. See `docs/HARDWARE_AND_PLATFORM.md` |
 | Amplifier | HiLetgo TPA3116D2 | 3.5 mm analog input | 2.1 channel: 2x50 W (L/R) + 1x100 W (Sub) |
 | Voice exciters | 2x Dayton DAEX25FHE-4 (4-ohm) | Amp L/R channels | Mounted to frame |
 | Bass exciter | 1x Dayton TT25-8 (8-ohm) | Amp Sub channel | Mounted to frame |
@@ -588,9 +588,10 @@ Web-based tool for creating and editing portrait metadata (region polygons, audi
 
 ## Known Blockers
 
-1. **Arducam GMSL2 driver compatibility with JetPack 5.1.3**
-   - The GMSL2 camera requires kernel-level driver support that may not be included in stock JetPack.
-   - **Mitigation:** Fall back to a USB webcam (e.g., Logitech C920) for development. The Vision process abstracts the camera source, so swapping is a config change.
+1. **~~Arducam GMSL2 driver compatibility~~ — RESOLVED**
+   - The GMSL2 camera works with a device tree patch that changes `pix_clk_hz` from 182.4 MHz to 300 MHz. No kernel module changes needed. The SerDes link is transparent.
+   - Fix applied and verified on 2026-02-28. See `~/GMSL2_CAMERA_FIX_GUIDE.md` for re-application after OS re-flash, and `docs/HARDWARE_AND_PLATFORM.md` for full camera details.
+   - The Vision process auto-detects Jetson and uses `nvarguscamerasrc` (GStreamer/ISP), with automatic V4L2 fallback for USB webcams.
 
 2. **Thermal management in enclosed frame**
    - The Jetson Orin NX generates significant heat under sustained workload. A 3D-printed enclosure restricts airflow.

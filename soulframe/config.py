@@ -17,10 +17,20 @@ DISPLAY_FPS = 60
 DISPLAY_SCREEN_INDEX = 0
 
 # ── Camera ─────────────────────────────────────────────────────────────────
-CAMERA_INDEX = 0          # /dev/video0
+CAMERA_INDEX = 0          # sensor-id for nvarguscamerasrc / /dev/video index fallback
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CAMERA_FPS = 30
+CAMERA_CAPTURE_WIDTH = 1280   # CSI capture resolution (must match an IMX219 sensor mode)
+CAMERA_CAPTURE_HEIGHT = 720   # 1280x720 @ 60fps is the closest native mode
+CAMERA_CAPTURE_FPS = 60       # native sensor fps for this mode
+CAMERA_FLIP_METHOD = 0        # 0=none, 2=180, see nvvidconv docs
+
+# GStreamer pipeline for Jetson + GMSL2 IMX219.  nvarguscamerasrc routes
+# through the hardware ISP (demosaic, AWB, AE, denoise) — required for the
+# Bayer sensor.  Set SOULFRAME_CAMERA_FORCE_V4L2=1 to fall back to plain
+# V4L2 (e.g. USB webcam without ISP).
+CAMERA_FORCE_V4L2 = bool(int(os.environ.get("SOULFRAME_CAMERA_FORCE_V4L2", "0")))
 
 # ── Vision ─────────────────────────────────────────────────────────────────
 FACE_DETECTION_CONFIDENCE = 0.5

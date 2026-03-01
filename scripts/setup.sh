@@ -90,6 +90,49 @@ echo ""
 echo "--- Checking camera devices ---"
 ls /dev/video* 2>/dev/null && echo "Video devices found" || echo "No /dev/video* devices found"
 
+# Jetson GMSL2 / CSI camera checks
+if command -v nvpmodel &>/dev/null; then
+    echo ""
+    echo "--- Jetson CSI camera checks ---"
+
+    # Verify nvargus-daemon is running (required for nvarguscamerasrc)
+    if systemctl is-active --quiet nvargus-daemon; then
+        echo "nvargus-daemon: running"
+    else
+        echo "nvargus-daemon: NOT running — starting it..."
+        sudo systemctl restart nvargus-daemon && echo "  started" || echo "  FAILED to start"
+    fi
+
+    # Check for IMX219 sensor
+    if dmesg | grep -q "imx219 9-0010"; then
+        echo "IMX219 sensor: detected on I2C bus 9"
+    else
+        echo "IMX219 sensor: NOT detected — check GMSL2 cable and receiver board power"
+    fi
+
+    # Verify pix_clk_hz patch (GMSL2 requires 300 MHz)
+    if command -v dtc &>/dev/null; then
+        PIX_CLK=$(sudo dtc -I fs /proc/device-tree -O dts 2>/dev/null | grep pix_clk_hz | head -1)
+        if echo "$PIX_CLK" | grep -q "300000000"; then
+            echo "pix_clk_hz: 300 MHz (GMSL2 patch applied)"
+        else
+            echo "WARNING: pix_clk_hz is NOT 300 MHz — GMSL2 video will be corrupted!"
+            echo "  See ~/GMSL2_CAMERA_FIX_GUIDE.md for fix instructions."
+        fi
+    fi
+
+    # Quick capture test
+    echo "Running quick capture test..."
+    if gst-launch-1.0 nvarguscamerasrc sensor-id=0 num-buffers=1 ! \
+        'video/x-raw(memory:NVMM), width=1280, height=720, framerate=60/1' ! \
+        nvjpegenc ! filesink location=/tmp/soulframe_camera_test.jpg 2>/dev/null; then
+        echo "Camera capture test: PASSED (/tmp/soulframe_camera_test.jpg)"
+    else
+        echo "Camera capture test: FAILED"
+        echo "  Check: sudo systemctl restart nvargus-daemon"
+    fi
+fi
+
 # ── Desktop autostart ──────────────────────────────────────────────────
 echo ""
 echo "--- Installing desktop autostart entry ---"
